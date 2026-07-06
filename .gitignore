@@ -1,0 +1,11 @@
+# 密钥与本地数据，勿提交
+.env
+xmp-test.mjs
+byteplus-test.mjs
+data/
+node_modules/
+
+# Next.js
+.next/
+out/
+next-env.d.ts
