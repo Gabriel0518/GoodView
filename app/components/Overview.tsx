@@ -14,6 +14,9 @@ import { LineChart } from "./charts";
 type Fmt = "money" | "int" | "pct";
 type Def = { key: string; label: string; group: string; fmt: Fmt; accent?: boolean; prov: string | null; v: () => number | null };
 
+// IG授权口径 = 绑定Ins任务完成（pwa_task_complete task_id=110）。非按钮点击(ins_auth_click)。
+const IG_STAGE = "task_ins_bind";
+
 const DEFAULT_CARDS = ["cost", "click", "c_install", "c_ig", "cost_ig", "c_withdraw", "cost_withdraw", "r_login_ig"];
 
 export default function Overview({ snapshot, funnel, sel, source }: { snapshot: Snapshot; funnel: Funnel | null; sel: Sel; source: SourceSel }) {
@@ -66,13 +69,13 @@ export default function Overview({ snapshot, funnel, sel, source }: { snapshot: 
     { key: "c_install", label: "安装成功", group: "人数", fmt: "int", prov: countProv, v: () => cnt("install_success") },
     { key: "c_login", label: "谷歌登录", group: "人数", fmt: "int", prov: countProv, v: () => cnt("login_click") },
     { key: "c_onboard", label: "完成引导(电话确认)", group: "人数", fmt: "int", prov: countProv, v: () => cnt("phone_confirm") },
-    { key: "c_ig", label: "IG授权", group: "人数", fmt: "int", accent: true, prov: countProv, v: () => cnt("ins_auth_click") },
+    { key: "c_ig", label: "IG授权(绑定完成)", group: "人数", fmt: "int", accent: true, prov: countProv, v: () => cnt(IG_STAGE) },
     { key: "c_mock", label: "mock通过", group: "人数", fmt: "int", prov: countProv, v: () => cnt("mock_result") },
     { key: "c_withdraw", label: "首笔提现", group: "人数", fmt: "int", accent: true, prov: countProv, v: () => cnt("withdraw_first") },
 
     { key: "cost_install", label: "单安装成本", group: "单位成本", fmt: "money", prov: unitProv, v: () => (unitProv ? div(stat.cost, cnt("install_success")) : null) },
     { key: "cost_login", label: "单登录成本", group: "单位成本", fmt: "money", prov: unitProv, v: () => (unitProv ? div(stat.cost, cnt("login_click")) : null) },
-    { key: "cost_ig", label: "单IG授权成本", group: "单位成本", fmt: "money", accent: true, prov: unitProv, v: () => (unitProv ? div(stat.cost, cnt("ins_auth_click")) : null) },
+    { key: "cost_ig", label: "单IG授权成本", group: "单位成本", fmt: "money", accent: true, prov: unitProv, v: () => (unitProv ? div(stat.cost, cnt(IG_STAGE)) : null) },
     { key: "cost_mock", label: "单mock成本", group: "单位成本", fmt: "money", prov: unitProv, v: () => (unitProv ? div(stat.cost, cnt("mock_result")) : null) },
     { key: "cost_withdraw", label: "单首笔提现成本", group: "单位成本", fmt: "money", accent: true, prov: unitProv, v: () => (unitProv ? div(stat.cost, cnt("withdraw_first")) : null) },
 
@@ -106,7 +109,7 @@ export default function Overview({ snapshot, funnel, sel, source }: { snapshot: 
   }, [snapshot, sel, from, to, source, channel, basis.byCampaign]);
   const igByDate = useMemo(() => {
     const out: Record<string, number> = {};
-    const st = funnel?.stages.find((s) => s.key === "ins_auth_click");
+    const st = funnel?.stages.find((s) => s.key === IG_STAGE);
     if (!funnel || !st) return out;
     const srcs = source === "all" ? [...SOURCES] : [source];
     funnel.dates.forEach((d, i) => { if (d >= from && d <= to) out[d] = srcs.reduce((a, s) => a + (st.bySource[s]?.data[i] || 0), 0); });
@@ -116,7 +119,7 @@ export default function Overview({ snapshot, funnel, sel, source }: { snapshot: 
   // 渠道级归因表（全渠道对比，不随 source 变）
   const attribution = useMemo(() => {
     if (!funnel) return null;
-    const st = funnel.stages.find((s) => s.key === "ins_auth_click");
+    const st = funnel.stages.find((s) => s.key === IG_STAGE);
     const ig = (src: string) => (st ? idx.reduce((a, i) => a + (st.bySource[src]?.data[i] || 0), 0) : 0);
     const chSpend = spendByChannel(snapshot, from, to);
     const rows = [

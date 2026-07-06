@@ -7,7 +7,7 @@ import { Panel, StatCard, Button } from "./ui";
 import { MultiSelect } from "./controls";
 import { Sparkline } from "./charts";
 
-const PRESET = ["install_success", "login_click", "ins_auth_click", "withdraw_first", "mock_result", "home_show"];
+const PRESET = ["install_success", "login_click", "task_ins_bind", "withdraw_first", "mock_result", "home_show"];
 
 export default function DailyReport({ snapshot, funnel, sel, source, dates }: { snapshot: Snapshot; funnel: Funnel; sel: Sel; source: SourceSel; dates: string[] }) {
   const cur = snapshot.meta.currency || "USD";
@@ -28,7 +28,7 @@ export default function DailyReport({ snapshot, funnel, sel, source, dates }: { 
     return srcs.reduce((a, s) => a + (st.bySource[s]?.data[i] || 0), 0);
   };
 
-  const igStage = funnel.stages.find((s) => s.key === "ins_auth_click");
+  const igStage = funnel.stages.find((s) => s.key === "task_ins_bind"); // IG授权=绑定Ins完成(task_id=110)
   const igCount = igStage ? sumAt(igStage, di) : 0;
 
   const cards = useMemo(() => {

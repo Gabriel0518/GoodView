@@ -50,8 +50,8 @@ export const FUNNEL = [
   { key: "task_realperson",      label: "真人验证任务完成",      name: "pwa_task_complete", filters: [{ property: "task_id", values: ["118"] }] },
   { key: "withdraw_task2",       label: "完成任务2(提现)",       name: "pwa_withdraw_audit_apply", filters: [{ property: "withdraw_amount", values: ["4", "7", "5.5"] }] },
   { key: "ins_auth_show",        label: "Ins授权浮层曝光",       name: "pwa_social_media_login_show" },
-  { key: "ins_auth_click",       label: "Ins授权浮层点击(IG授权)", name: "pwa_ins_login_button_click" },
-  { key: "task_ins_bind",        label: "绑定Ins任务完成",       name: "pwa_task_complete", filters: [{ property: "task_id", values: ["110"] }] },
+  { key: "ins_auth_click",       label: "Ins授权浮层点击",       name: "pwa_ins_login_button_click" },
+  { key: "task_ins_bind",        label: "绑定Ins任务完成(IG授权)", name: "pwa_task_complete", filters: [{ property: "task_id", values: ["110"] }] },
   { key: "ins_auth_success",     label: "Ins授权回调-授权成功",  name: "pwa_earning_ins_task_page_two_click" },
   { key: "device_perm",          label: "授予设备浮层权限",      name: "pwa_afk_sys_request_pop_up_click" },
 ];
