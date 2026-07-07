@@ -8,7 +8,7 @@
     "start": "next start -H 0.0.0.0 -p ${PORT:-7101}",
     "db:migrate": "node db/migrate.mjs",
     "pull": "node pull-all.mjs",
-    "pull:backfill": "node pull-all.mjs 180",
+    "pull:backfill": "node pull-all.mjs 365",
     "pull:seq": "node fetch-snapshot.mjs && node fetch-funnel.mjs",
     "daemon": "node daemon.mjs"
   },
