@@ -134,13 +134,15 @@ function buildFunnelSQL(req: QueryRequest, dims: DimKey[], gran: Granularity, fr
   const selDims = dims.map((d) => `${FUNNEL_DIM[d].sel(gran)} AS ${d}`);
   const groupDims = dims.map((d) => FUNNEL_DIM[d].group(gran));
   const needMeta = dims.includes("stage");
+  // 阶段维度按漏斗顺序(ord)排，而非数值——漏斗图/透视需要阶段自然顺序。
+  const orderBy = dims.includes("date") ? "1" : needMeta ? "MAX(m.ord)" : "value DESC";
   const sql =
     `SELECT ${[...selDims, `${valueExpr} AS value`].join(", ")}
      FROM funnel_daily f
      ${needMeta ? "JOIN funnel_stage_meta m ON m.stage_key = f.stage_key" : ""}
      WHERE ${conds.join(" AND ")}
      ${groupDims.length ? "GROUP BY " + groupDims.join(", ") : ""}
-     ORDER BY ${dims.includes("date") ? "1" : "value DESC"}`;
+     ORDER BY ${orderBy}`;
   return { sql, params };
 }
 

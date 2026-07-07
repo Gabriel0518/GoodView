@@ -1,10 +1,8 @@
-import { loadSnapshot, loadFunnel } from "./lib/data";
-import Dashboard from "./components/Dashboard";
+"use client";
 
-// 每次请求重新读文件，刷新数据后 reload 即可看到最新
-export const dynamic = "force-dynamic";
+// v2 首页 = 看板列表（自助搭建器入口）。v1 旧版看板灰度期保留在 /legacy。
+import { BoardList } from "./components/board/BoardList";
 
-export default async function Page() {
-  const [snapshot, funnel] = await Promise.all([loadSnapshot(), loadFunnel()]);
-  return <Dashboard snapshot={snapshot} funnel={funnel} />;
+export default function Home() {
+  return <BoardList />;
 }
