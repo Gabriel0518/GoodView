@@ -50,10 +50,10 @@ const BYCHANNELDATE_SQL = `
 
 const CAMPAIGNROWS_SQL = `
   SELECT to_char(date,'YYYY-MM-DD') AS date, account_id, account_name, channel,
-         campaign_id, campaign_name, cost::float8 AS cost,
+         campaign_id, campaign_name, adset_id, adset_name, cost::float8 AS cost,
          impression::float8 AS impression, click::float8 AS click
   FROM campaign_daily WHERE date BETWEEN $1 AND $2
-  ORDER BY date DESC, account_id, campaign_id`;
+  ORDER BY date DESC, account_id, campaign_id, adset_id`;
 
 export async function getSnapshot(): Promise<Snapshot | null> {
   return withClient(async (c) => {

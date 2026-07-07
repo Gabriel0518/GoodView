@@ -29,15 +29,26 @@ CREATE TABLE IF NOT EXISTS ig_auth_daily (
 );
 
 -- ========== funnel_stage_meta：47 阶段定义（播种自 funnel-events.mjs FUNNEL[]）==========
+-- P1.2 起 DB 为事件定义的权威源；funnel-events.mjs 仅作初始种子。
+--   enabled      : 是否参与拉取（false=停用，fetch-funnel 跳过）
+--   source_split : 是否按 source(fb/tt/…) 拆分；false=只存日总额到 source='unknown'
+--   indicator    : BytePlus event_indicator（默认 event_users=去重人数）
 CREATE TABLE IF NOT EXISTS funnel_stage_meta (
-  stage_key  text        NOT NULL PRIMARY KEY,   -- 如 "lp_show"
-  ord        int         NOT NULL,               -- 0..46，控制 stages[] 顺序
-  label      text        NOT NULL,               -- "投广页曝光"
-  event_name text        NOT NULL,               -- BytePlus event_name == Stage.name
-  filters    jsonb,                              -- NULL 或 [{"property":..,"values":[..]}]
-  status     text,                              -- 运行时状态（ok / ok(by ...) / 失败:...）
-  updated_at timestamptz NOT NULL DEFAULT now()
+  stage_key    text        NOT NULL PRIMARY KEY,   -- 如 "lp_show"
+  ord          int         NOT NULL,               -- 0..46，控制 stages[] 顺序
+  label        text        NOT NULL,               -- "投广页曝光"
+  event_name   text        NOT NULL,               -- BytePlus event_name == Stage.name
+  filters      jsonb,                              -- NULL 或 [{"property":..,"values":[..]}]
+  enabled      boolean     NOT NULL DEFAULT true,
+  source_split boolean     NOT NULL DEFAULT true,
+  indicator    text        NOT NULL DEFAULT 'event_users',
+  status       text,                              -- 运行时状态（ok / ok(by ...) / 失败:...）
+  updated_at   timestamptz NOT NULL DEFAULT now()
 );
+-- 对已存在的旧表补列（幂等；新建库时为 no-op）
+ALTER TABLE funnel_stage_meta ADD COLUMN IF NOT EXISTS enabled      boolean NOT NULL DEFAULT true;
+ALTER TABLE funnel_stage_meta ADD COLUMN IF NOT EXISTS source_split boolean NOT NULL DEFAULT true;
+ALTER TABLE funnel_stage_meta ADD COLUMN IF NOT EXISTS indicator    text    NOT NULL DEFAULT 'event_users';
 
 -- ========== funnel_daily：date × stage_key × source -> 人数（原子事实）==========
 -- unknown 作为普通 source 行存（值由 fetch-funnel.mjs 的 fillUnknown 算好，含 Math.max(0,…) 下限）

@@ -17,21 +17,23 @@ async function main() {
   console.log("✅ schema 已应用");
 
   // 2) 播种 funnel_stage_meta（ord = FUNNEL 数组顺序）
+  //    P1.2 起 DB 为事件定义权威源 → 只插入缺失阶段（DO NOTHING），不覆盖 DB 侧已有配置。
+  //    新增列 enabled/source_split/indicator 用 FUNNEL 里的值或默认。
   let n = 0;
   for (let ord = 0; ord < FUNNEL.length; ord++) {
     const s = FUNNEL[ord];
     const filters = s.filters ? JSON.stringify(s.filters) : null;
-    await query(
-      `INSERT INTO funnel_stage_meta (stage_key, ord, label, event_name, filters, updated_at)
-       VALUES ($1,$2,$3,$4,$5::jsonb, now())
-       ON CONFLICT (stage_key) DO UPDATE SET
-         ord = EXCLUDED.ord, label = EXCLUDED.label,
-         event_name = EXCLUDED.event_name, filters = EXCLUDED.filters, updated_at = now()`,
-      [s.key, ord, s.label, s.name, filters],
+    const res = await query(
+      `INSERT INTO funnel_stage_meta
+         (stage_key, ord, label, event_name, filters, enabled, source_split, indicator, updated_at)
+       VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8, now())
+       ON CONFLICT (stage_key) DO NOTHING`,
+      [s.key, ord, s.label, s.name, filters,
+       s.enabled ?? true, s.source_split ?? true, s.indicator ?? "event_users"],
     );
-    n++;
+    n += res.rowCount || 0;
   }
-  console.log(`✅ funnel_stage_meta 已播种 ${n} 个阶段`);
+  console.log(`✅ funnel_stage_meta 播种：新增 ${n} 个阶段（已存在的不覆盖，DB 为权威源）`);
 
   await end();
 }

@@ -1,11 +1,10 @@
-// 拉取完整漏斗：47 阶段 × 按 source 拆分(fb/tt/bff/AIguild/active/passive/unknown) → 写 Postgres。
+// 拉取完整漏斗：启用的阶段 × 按 source 拆分(fb/tt/bff/AIguild/active/passive/unknown) → 写 Postgres。
+// P1.2 起：事件定义从 DB(funnel_stage_meta WHERE enabled) 读取，不再 import funnel-events.mjs（后者仅作 migrate 种子）。
 // 加速：① 合并同名事件(如 pwa_task_complete 7 个 stage → 1 组请求) ② 组间并发(池) ③ unknown=全量−已知源
 // 用法：node fetch-funnel.mjs [天数] [并发数]   默认 30 天、并发 6
 import { fetchEventDaily, fetchEventDailyGrouped } from "./lib/byteplus.mjs";
 import { pMap } from "./lib/http.mjs";
 import { query, withTx, bulkInsert, end } from "./lib/db.mjs";
-import { FUNNEL } from "./funnel-events.mjs";
-import { BYTEPLUS } from "./config.mjs";
 
 const DAYS = Number(process.argv[2]) || 30;
 const CONCURRENCY = Number(process.argv[3]) || 6;
@@ -18,6 +17,20 @@ const FUNNEL_COLS = [
   { name: "source", type: "text" },
   { name: "count", type: "bigint" },
 ];
+
+// 从 DB 读启用的事件定义（DB 为权威源）。filters 为 jsonb → pg 自动解析为 JS 对象。
+async function loadFunnelDefs() {
+  const { rows } = await query(
+    `SELECT stage_key AS key, ord, label, event_name AS name, filters, source_split, indicator
+       FROM funnel_stage_meta WHERE enabled = true ORDER BY ord`,
+  );
+  return rows.map((r) => ({
+    key: r.key, ord: r.ord, label: r.label, name: r.name,
+    filters: r.filters || null,
+    source_split: r.source_split,
+    indicator: r.indicator || "event_users",
+  }));
+}
 
 const emptyBySource = () => Object.fromEntries(SOURCES.map((s) => [s, { data: [], sum: 0 }]));
 
@@ -55,14 +68,25 @@ function fillUnknown(bySource, totalPerDay, nDays) {
   }
   bySource.unknown = { data, sum: data.reduce((a, b) => a + b, 0) };
 }
+// source_split=false：不按 source 拆，日总额全部记到 unknown（known 全 0）。复用 fillUnknown。
+function totalOnly(totalPerDay, nDays) {
+  const bySource = emptyBySource();
+  for (const s of KNOWN) bySource[s] = { data: Array(nDays).fill(0), sum: 0 };
+  fillUnknown(bySource, totalPerDay, nDays);
+  return bySource;
+}
 
-// 把同一 (event_name + 过滤属性) 的 stage 合并成一个请求组
-function buildGroups() {
+// 把同一 (event_name + 过滤属性 + indicator + source_split) 的 stage 合并成一个请求组。
+// source_split/indicator 不同的同名事件不能共用一次请求，故进 key。
+function buildGroups(defs) {
   const map = new Map();
-  for (const st of FUNNEL) {
+  for (const st of defs) {
     const f = (st.filters || [])[0];
-    const key = f ? `${st.name}|${f.property}` : `solo:${st.key}`;
-    if (!map.has(key)) map.set(key, { name: st.name, property: f?.property || null, stages: [] });
+    const base = f ? `${st.name}|${f.property}` : `solo:${st.key}`;
+    const key = `${base}|${st.indicator}|${st.source_split}`;
+    if (!map.has(key)) {
+      map.set(key, { name: st.name, property: f?.property || null, indicator: st.indicator, source_split: st.source_split, stages: [] });
+    }
     map.get(key).stages.push(st);
   }
   return [...map.values()];
@@ -71,22 +95,44 @@ function buildGroups() {
 // 拉一个组，返回 { [stageKey]: {bySource, dates, status} }
 async function fetchGroup(group) {
   const out = {};
+  const ind = group.indicator;
+
   if (!group.property) {
     const st = group.stages[0];
+    if (!group.source_split) {
+      // 只拉日总额，记到 unknown
+      const totalDaily = await fetchEventDaily({ eventName: st.name, lastDays: DAYS, indicator: ind });
+      const dates = totalDaily.map((x) => x.date);
+      const bySource = totalOnly(totalDaily.map((x) => x.count), dates.length);
+      out[st.key] = { bySource, dates, status: "ok(no-split)" };
+      return out;
+    }
     const [grouped, totalDaily] = await Promise.all([
-      fetchEventDailyGrouped({ eventName: st.name, lastDays: DAYS, groupBy: "source", propertyType: "profile", groupLocation: "content" }),
-      fetchEventDaily({ eventName: st.name, lastDays: DAYS }),
+      fetchEventDailyGrouped({ eventName: st.name, lastDays: DAYS, groupBy: "source", propertyType: "profile", groupLocation: "content", indicator: ind }),
+      fetchEventDaily({ eventName: st.name, lastDays: DAYS, indicator: ind }),
     ]);
     const bySource = pickSingle(grouped.series);
     fillUnknown(bySource, totalDaily.map((x) => x.count), grouped.dates.length);
     out[st.key] = { bySource, dates: grouped.dates, status: "ok" };
     return out;
   }
-  // 有过滤属性：一次二维分组 + 一次单维(属性)分组，覆盖该 event 的所有 stage
+
+  // 有过滤属性
   const propGroup = { property_name: group.property, property_type: "event_param", location: "event" };
+  if (!group.source_split) {
+    // 只按属性分组一次（不按 source）；每个 stage 取其 value 的总额 → 记到 unknown
+    const resTotal = await fetchEventDailyGrouped({ eventName: group.name, lastDays: DAYS, groups: [propGroup], indicator: ind });
+    for (const st of group.stages) {
+      const vals = st.filters[0].values;
+      const total = totalsFromValueDim(resTotal.series, vals);
+      out[st.key] = { bySource: totalOnly(total, resTotal.dates.length), dates: resTotal.dates, status: `ok(by ${group.property}, no-split)` };
+    }
+    return out;
+  }
+  // 一次二维分组(source×属性) + 一次单维(属性)分组，覆盖该 event 的所有 stage
   const [res, resTotal] = await Promise.all([
-    fetchEventDailyGrouped({ eventName: group.name, lastDays: DAYS, groups: [{ property_name: "source", property_type: "profile", location: "content" }, propGroup] }),
-    fetchEventDailyGrouped({ eventName: group.name, lastDays: DAYS, groups: [propGroup] }),
+    fetchEventDailyGrouped({ eventName: group.name, lastDays: DAYS, groups: [{ property_name: "source", property_type: "profile", location: "content" }, propGroup], indicator: ind }),
+    fetchEventDailyGrouped({ eventName: group.name, lastDays: DAYS, groups: [propGroup], indicator: ind }),
   ]);
   for (const st of group.stages) {
     const vals = st.filters[0].values;
@@ -99,8 +145,14 @@ async function fetchGroup(group) {
 
 async function main() {
   const t0 = Date.now();
-  const groups = buildGroups();
-  console.log(`拉取完整漏斗（最近 ${DAYS} 天，${FUNNEL.length} 阶段合并为 ${groups.length} 组请求，并发 ${CONCURRENCY}）\n`);
+  const defs = await loadFunnelDefs();
+  if (!defs.length) {
+    console.error("[funnel] funnel_stage_meta 无启用阶段（先跑 node db/migrate.mjs 播种）。跳过。");
+    await end();
+    process.exit(1);
+  }
+  const groups = buildGroups(defs);
+  console.log(`拉取完整漏斗（最近 ${DAYS} 天，${defs.length} 启用阶段合并为 ${groups.length} 组请求，并发 ${CONCURRENCY}）\n`);
 
   const results = await pMap(groups, fetchGroup, CONCURRENCY);
 
@@ -121,13 +173,13 @@ async function main() {
 
   const stages = [];
   console.log(`${pad("阶段", 22)} ${SOURCES.map((s) => pad(s, 8)).join(" ")} ${pad("合计", 9)} 状态`);
-  for (const stage of FUNNEL) {
-    const r = byKey[stage.key] || {};
+  for (const def of defs) {
+    const r = byKey[def.key] || {};
     const bySource = r.bySource || emptyBySource();
     const status = r.status || "失败:无结果";
     const total = SOURCES.reduce((a, s) => a + (bySource[s]?.sum || 0), 0);
-    stages.push({ key: stage.key, label: stage.label, name: stage.name, filters: stage.filters || null, status, bySource, total });
-    console.log(`${pad(stage.label, 22)} ${SOURCES.map((s) => pad(bySource[s]?.sum ?? 0, 8)).join(" ")} ${pad(total, 9)} ${status}`);
+    stages.push({ key: def.key, label: def.label, name: def.name, filters: def.filters || null, status, bySource, total });
+    console.log(`${pad(def.label, 22)} ${SOURCES.map((s) => pad(bySource[s]?.sum ?? 0, 8)).join(" ")} ${pad(total, 9)} ${status}`);
   }
 
   const bad = stages.filter((s) => s.status.startsWith("失败"));
@@ -137,18 +189,14 @@ async function main() {
     process.exit(1);
   }
 
-  // 同步 funnel_stage_meta（ord/label/event_name/filters/status）
-  for (let ord = 0; ord < stages.length; ord++) {
-    const s = stages[ord];
-    await query(
-      `INSERT INTO funnel_stage_meta (stage_key, ord, label, event_name, filters, status, updated_at)
-       VALUES ($1,$2,$3,$4,$5::jsonb,$6, now())
-       ON CONFLICT (stage_key) DO UPDATE SET
-         ord=EXCLUDED.ord, label=EXCLUDED.label, event_name=EXCLUDED.event_name,
-         filters=EXCLUDED.filters, status=EXCLUDED.status, updated_at=now()`,
-      [s.key, ord, s.label, s.name, s.filters ? JSON.stringify(s.filters) : null, s.status],
-    );
-  }
+  // 只回写运行时 status（定义字段以 DB 为权威源，不覆盖）。一条 unnest 批量更新，
+  // 少 47 次往返 → 更快、也少一次中途被 proxy 掐断导致 status 半写。
+  await query(
+    `UPDATE funnel_stage_meta m SET status = v.status, updated_at = now()
+       FROM unnest($1::text[], $2::text[]) AS v(stage_key, status)
+      WHERE m.stage_key = v.stage_key`,
+    [stages.map((s) => s.key), stages.map((s) => s.status)],
+  );
 
   // funnel_daily：只对成功阶段做「按(日期,阶段)删除 + 插入」，失败阶段保留旧数据
   const okStages = stages.filter((s) => !s.status.startsWith("失败"));

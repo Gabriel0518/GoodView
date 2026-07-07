@@ -23,6 +23,24 @@ function dateChunks(startYmd, endYmd, maxDays) {
 }
 const XMP_MAX_DAYS = Number(process.env.XMP_MAX_DAYS || 90);
 
+// XMP 在 adset 粒度会返回重复行（实测多为 0 值的完全重复行；亦可能有隐藏子维拆分）。
+// 按 PK (date, account_id, campaign_id, adset_id) 聚合求和 → 天然去重、且隐藏拆分被正确合并。
+// 已验证：adset 级聚合总额 == campaign 级总额（仅 XMP 自身分级舍入的微差）。
+const KEY_SEP = String.fromCharCode(31); // US 分隔符，绝不出现在日期/ID/名称中，避免键边界歧义
+function aggregateByPk(rows) {
+  const m = new Map();
+  for (const r of rows) {
+    const k = r.date + KEY_SEP + r.account_id + KEY_SEP + r.campaign_id + KEY_SEP + r.adset_id;
+    const o = m.get(k);
+    if (o) {
+      o.cost += r.cost; o.impression += r.impression; o.click += r.click;
+    } else {
+      m.set(k, { ...r });
+    }
+  }
+  return [...m.values()];
+}
+
 const CAMPAIGN_COLS = [
   { name: "date", type: "date" },
   { name: "account_id", type: "text" },
@@ -30,6 +48,8 @@ const CAMPAIGN_COLS = [
   { name: "channel", type: "text" },
   { name: "campaign_id", type: "text" },
   { name: "campaign_name", type: "text" },
+  { name: "adset_id", type: "text" },
+  { name: "adset_name", type: "text" },
   { name: "cost", type: "numeric" },
   { name: "impression", type: "bigint" },
   { name: "click", type: "bigint" },
@@ -45,7 +65,7 @@ async function main() {
   console.log(`[snapshot] 拉取 ${startDate} ~ ${endDate}（${days} 天）...`);
 
   const M = ["cost", "impression", "click"];
-  const dim = ["date", "account_name", "campaign_id", "campaign_name"];
+  const dim = ["date", "account_name", "campaign_id", "campaign_name", "adset_id", "adset_name"];
 
   // XMP 单次最多 90 天：>90 天时分段拉取再合并。BytePlus IG 并行拉（无此限制）。
   const chunks = dateChunks(startDate, endDate, XMP_MAX_DAYS);
@@ -66,6 +86,8 @@ async function main() {
         channel: r.module,
         campaign_id: r.campaign_id,
         campaign_name: r.campaign_name || r.campaign_id,
+        adset_id: r.adset_id || "_",           // 无 adset 时占位（对齐 schema/主键）
+        adset_name: r.adset_name || r.adset_id || "_",
         cost: Number(r.cost) || 0,
         impression: Number(r.impression) || 0,
         click: Number(r.click) || 0,
@@ -78,7 +100,7 @@ async function main() {
   for (const [cs, ce] of chunks) {
     if (chunks.length > 1) console.log(`[snapshot]   段 ${cs} ~ ${ce} …`);
     const part = await fetchReport({ startDate: cs, endDate: ce, dimension: dim, metrics: M });
-    const rows = transform(part);
+    const rows = aggregateByPk(transform(part)); // 折叠 XMP adset 重复行至 PK 粒度，防主键冲突
     if (!rows.length) continue;
     const coveredDates = [...new Set(rows.map((r) => r.date))];
     // campaign_daily：按本段覆盖的日期删除 + 分批插入（同一事务，处理缩量再拉）

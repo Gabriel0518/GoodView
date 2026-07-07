@@ -26,6 +26,8 @@ export type CampaignRow = {
   channel: string;
   campaign_id: string;
   campaign_name: string;
+  adset_id: string;
+  adset_name: string;
   cost: number;
   impression: number;
   click: number;
