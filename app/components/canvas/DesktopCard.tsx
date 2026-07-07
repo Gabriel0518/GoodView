@@ -38,11 +38,12 @@ export function DesktopCard({
   const onMovePtr = (e: React.PointerEvent) => {
     const dr = drag.current;
     if (!dr) return;
+    const rawDx = e.clientX - dr.sx;
+    const rawDy = e.clientY - dr.sy;
+    // 点击/拖动判定用【屏幕像素】阈值（不受缩放影响，否则缩小后点击被误判为拖动）
+    if (Math.abs(rawDx) > 4 || Math.abs(rawDy) > 4) dr.moved = true;
     const s = getScale() || 1;
-    const dx = (e.clientX - dr.sx) / s;
-    const dy = (e.clientY - dr.sy) / s;
-    if (Math.abs(dx) > 3 || Math.abs(dy) > 3) dr.moved = true;
-    setP({ x: Math.max(0, dr.ox + dx), y: Math.max(0, dr.oy + dy) });
+    setP({ x: Math.max(0, dr.ox + rawDx / s), y: Math.max(0, dr.oy + rawDy / s) });
   };
   const onUp = (e: React.PointerEvent) => {
     const dr = drag.current;
@@ -57,6 +58,8 @@ export function DesktopCard({
       onOpen(d.id);
     }
   };
+  // 指针取消（右键/触摸中断等）：复位拖动态，避免 drag.current 卡住导致外部同步失效
+  const onCancel = () => { drag.current = null; setP(pos); };
 
   const bf = d.board_filters;
   const src = bf?.groupId ? `组 #${bf.groupId}` : bf?.accounts?.length ? `账户 ${bf.accounts.length}` : "全渠道";
@@ -71,6 +74,7 @@ export function DesktopCard({
       onPointerDown={onDown}
       onPointerMove={onMovePtr}
       onPointerUp={onUp}
+      onPointerCancel={onCancel}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">

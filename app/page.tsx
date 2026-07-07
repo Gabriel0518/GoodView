@@ -8,7 +8,10 @@ import type { Dashboard, CanvasPos } from "./components/board/types";
 import { DEFAULT_BOARD_FILTERS } from "./components/board/types";
 import { listDashboards, createDashboard, copyDashboard, updateDashboard, deleteDashboard } from "./components/board/api";
 import { Canvas, defaultPos } from "./components/canvas/Canvas";
+import { FloatingDock } from "./components/canvas/FloatingDock";
 import { BoardModal } from "./components/board/BoardModal";
+import { GroupsModal } from "./components/admin/GroupsModal";
+import { EventsModal } from "./components/admin/EventsModal";
 
 export default function Page() {
   return (
@@ -25,6 +28,8 @@ function CanvasHome() {
   const params = useSearchParams();
   const boardParam = params.get("board");
   const boardId = boardParam && /^\d+$/.test(boardParam) ? Number(boardParam) : null;
+  const modalParam = params.get("modal");
+  const modal = modalParam === "groups" || modalParam === "events" ? modalParam : null;
 
   const [dashboards, setDashboards] = useState<Dashboard[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
@@ -93,12 +98,12 @@ function CanvasHome() {
         <Canvas dashboards={dashboards} onOpen={openBoard} onMove={moveCard} onMenu={(id, a) => setMenu({ id, x: a.x, y: a.y })} />
       )}
 
-      {/* 临时新建按钮（V3.3 移入浮动侧栏） */}
-      {dashboards && dashboards.length > 0 && (
-        <button onClick={newBoard} className="absolute left-5 top-5 z-20 inline-flex items-center gap-1.5 rounded-lg bg-accent px-3.5 py-2 text-sm font-medium text-white shadow-md hover:bg-accent-600">
-          <Plus size={16} /> 新建看板
-        </button>
-      )}
+      {/* 浮动侧栏（V3.3）：新建看板 / 广告分组 / 事件配置 */}
+      <FloatingDock
+        onNewBoard={newBoard}
+        onOpenGroups={() => router.push("/?modal=groups")}
+        onOpenEvents={() => router.push("/?modal=events")}
+      />
 
       {err && <div className="absolute bottom-5 left-5 z-20 max-w-sm rounded-xl border border-danger/30 bg-danger-soft px-4 py-2.5 text-xs text-danger shadow-sm">{err}</div>}
 
@@ -126,6 +131,10 @@ function CanvasHome() {
 
       {/* 看板弹窗（深链 ?board） */}
       {boardId != null && <BoardModal boardId={boardId} onClose={closeBoard} />}
+
+      {/* 配置弹窗（深链 ?modal） */}
+      {modal === "groups" && <GroupsModal onClose={() => router.push("/")} />}
+      {modal === "events" && <EventsModal onClose={() => router.push("/")} />}
     </div>
   );
 }
