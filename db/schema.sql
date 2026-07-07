@@ -89,3 +89,27 @@ CREATE TABLE IF NOT EXISTS ad_groups (
   updated_at   timestamptz NOT NULL DEFAULT now()
 );
 
+-- ========== dashboards / cards：多看板 + 卡片持久化（P2 自助搭建器）==========
+-- board_filters: { window/dateFrom/dateTo, granularity, groupId?/accounts?/campaigns?/adsets?, channels?, sources? }
+CREATE TABLE IF NOT EXISTS dashboards (
+  id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name          text        NOT NULL,
+  board_filters jsonb       NOT NULL DEFAULT '{}',
+  is_template   boolean     NOT NULL DEFAULT false,
+  created_at    timestamptz NOT NULL DEFAULT now(),
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+-- config: { measure, params{stage?/cvrFrom?/cvrTo?}, dims[], viz, cardFilters? }
+-- layout: { x, y, w, h }（react-grid-layout 栅格）
+CREATE TABLE IF NOT EXISTS cards (
+  id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  dashboard_id bigint      NOT NULL REFERENCES dashboards (id) ON DELETE CASCADE,
+  title        text        NOT NULL DEFAULT '',
+  config       jsonb       NOT NULL DEFAULT '{}',
+  layout       jsonb       NOT NULL DEFAULT '{}',
+  ord          int         NOT NULL DEFAULT 0,
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS cards_dashboard_idx ON cards (dashboard_id);
+

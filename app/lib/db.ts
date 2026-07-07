@@ -13,9 +13,10 @@ async function connect() {
   return client;
 }
 
-// Railway 公网 proxy 偶发掐连接（Connection terminated / ECONNRESET）→ 瞬时错误重试
+// Railway 公网 proxy 偶发掐连接（Connection terminated / ECONNRESET）→ 瞬时错误重试。
+// 指数退避最多 ~28s，够渡过 proxy 短暂罢工（与脚本层 lib/db.mjs 同策略）。
 const TRANSIENT = /terminated|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE|socket hang up/i;
-async function withRetry<T>(fn: () => Promise<T>, retries = 2): Promise<T> {
+async function withRetry<T>(fn: () => Promise<T>, retries = 6): Promise<T> {
   let lastErr: unknown;
   for (let i = 0; i <= retries; i++) {
     try {
@@ -23,7 +24,7 @@ async function withRetry<T>(fn: () => Promise<T>, retries = 2): Promise<T> {
     } catch (e) {
       lastErr = e;
       if (i === retries || !TRANSIENT.test(String((e as Error)?.message || e))) throw e;
-      await new Promise((r) => setTimeout(r, 300 * (i + 1)));
+      await new Promise((r) => setTimeout(r, Math.min(800 * 2 ** i, 8000)));
     }
   }
   throw lastErr;
