@@ -104,14 +104,14 @@ export function CardBuilder({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 p-4" onMouseDown={onCancel}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-strong/40 p-4" onMouseDown={onCancel}>
       <div
-        className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-ink-700 bg-ink-950 shadow-2xl"
+        className="flex max-h-[90vh] w-full max-w-5xl flex-col overflow-hidden rounded-2xl border border-border bg-surface shadow-md"
         onMouseDown={(e) => e.stopPropagation()}
       >
         {/* 头 */}
-        <div className="flex items-center justify-between gap-3 border-b border-ink-700 px-5 py-3">
-          <h2 className="text-sm font-semibold text-zinc-100">{initial ? "编辑卡片" : "新建卡片"}</h2>
+        <div className="flex items-center justify-between gap-3 border-b border-border px-5 py-3">
+          <h2 className="text-sm font-semibold text-strong">{initial ? "编辑卡片" : "新建卡片"}</h2>
           <div className="flex items-center gap-2">
             <Button variant="ghost" onClick={onCancel}>
               取消
@@ -125,13 +125,13 @@ export function CardBuilder({
         {/* 体：左配置 / 右预览 */}
         <div className="grid min-h-0 flex-1 grid-cols-1 gap-0 overflow-hidden md:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
           {/* 左：引导配置 */}
-          <div className="min-h-0 space-y-4 overflow-y-auto border-r border-ink-700 p-5">
+          <div className="min-h-0 space-y-4 overflow-y-auto border-r border-border p-5">
             <Field label="标题">
               <input
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 placeholder="卡片标题"
-                className="w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-accent"
+                className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-body outline-none placeholder:text-faint focus:border-accent focus:ring-2 focus:ring-accent/20"
               />
             </Field>
 
@@ -142,15 +142,15 @@ export function CardBuilder({
             {m && (m.needsStage || m.needsCvr) && (
               <Field label="② 参数">
                 {stagesLoading ? (
-                  <p className="text-[11px] text-zinc-600">加载阶段列表…</p>
+                  <p className="text-[11px] text-muted">加载阶段列表…</p>
                 ) : stageOptions.length === 0 ? (
-                  <p className="text-[11px] text-amber-400/80">阶段列表未就绪（/api/meta/stages）。后端就绪后可选。</p>
+                  <p className="text-[11px] text-warning">阶段列表未就绪（/api/meta/stages）。后端就绪后可选。</p>
                 ) : m.needsStage ? (
                   <Select label="阶段" value={stage} options={stageOptions} onChange={setStage} />
                 ) : (
                   <div className="flex flex-wrap items-center gap-2">
                     <Select label="起始阶段" value={cvrFrom} options={stageOptions} onChange={setCvrFrom} />
-                    <span className="text-zinc-600">→</span>
+                    <span className="text-faint">→</span>
                     <Select label="目标阶段" value={cvrTo} options={stageOptions} onChange={setCvrTo} />
                   </div>
                 )}
@@ -161,7 +161,7 @@ export function CardBuilder({
               {measure ? (
                 <DimPicker measure={measure} dims={dims} onChange={setDims} maxDims={3} />
               ) : (
-                <p className="text-[11px] text-zinc-600">请先选择度量</p>
+                <p className="text-[11px] text-muted">请先选择度量</p>
               )}
             </Field>
 
@@ -169,17 +169,17 @@ export function CardBuilder({
               {measure ? (
                 <VizPicker dims={dims} value={viz} onChange={setViz} />
               ) : (
-                <p className="text-[11px] text-zinc-600">请先选择度量</p>
+                <p className="text-[11px] text-muted">请先选择度量</p>
               )}
             </Field>
           </div>
 
           {/* 右：实时预览 */}
-          <div className="min-h-0 overflow-y-auto bg-ink-900/40 p-5">
-            <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-zinc-600">预览</div>
+          <div className="min-h-0 overflow-y-auto bg-canvas p-5">
+            <div className="mb-2 text-[11px] font-medium uppercase tracking-wide text-muted">预览</div>
             <Panel className="min-h-[260px]">
               {!measure || !vizOk || !paramsOk ? (
-                <div className="py-12 text-center text-xs text-zinc-600">
+                <div className="py-12 text-center text-xs text-muted">
                   {!measure
                     ? "选择度量开始搭建"
                     : !paramsOk
@@ -200,7 +200,7 @@ export function CardBuilder({
 function Field({ label, children }: { label: string; children: React.ReactNode }) {
   return (
     <div>
-      <div className="mb-1.5 text-xs font-medium text-zinc-400">{label}</div>
+      <div className="mb-1.5 text-xs font-medium text-body">{label}</div>
       {children}
     </div>
   );

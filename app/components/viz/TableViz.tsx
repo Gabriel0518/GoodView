@@ -17,8 +17,8 @@ export function TableViz({ rows, meta }: { rows: QueryRow[]; meta: QueryMeta }) 
         <table className="w-full text-sm">
           <tbody>
             <tr>
-              <td className="py-1 text-zinc-400">{meta.measure}</td>
-              <td className="tnum py-1 text-right text-zinc-100">{fmtValue(rows[0]?.value ?? 0, meta.unit)}</td>
+              <td className="py-1 text-muted">{meta.measure}</td>
+              <td className="tnum py-1 text-right text-strong">{fmtValue(rows[0]?.value ?? 0, meta.unit)}</td>
             </tr>
           </tbody>
         </table>
@@ -39,18 +39,18 @@ export function TableViz({ rows, meta }: { rows: QueryRow[]; meta: QueryMeta }) 
       <TableShell onExport={csv}>
         <table className="w-full text-xs">
           <thead>
-            <tr className="border-b border-ink-700 text-zinc-500">
+            <tr className="border-b border-border bg-subtle text-muted">
               <th className="px-2 py-1.5 text-left font-medium">{DIM_META[d].label}</th>
               <th className="px-2 py-1.5 text-right font-medium">{meta.measure}</th>
             </tr>
           </thead>
           <tbody>
             {list.map((r, i) => (
-              <tr key={i} className="border-b border-ink-800/60">
-                <td className="max-w-[220px] truncate px-2 py-1.5 text-zinc-300" title={String(r[d] ?? "")}>
+              <tr key={i} className="border-b border-border-hair hover:bg-subtle">
+                <td className="max-w-[220px] truncate px-2 py-1.5 text-body" title={String(r[d] ?? "")}>
                   {String(r[d] ?? "—")}
                 </td>
-                <td className="tnum px-2 py-1.5 text-right text-zinc-100">{fmtValue(r.value, meta.unit)}</td>
+                <td className="tnum px-2 py-1.5 text-right text-strong">{fmtValue(r.value, meta.unit)}</td>
               </tr>
             ))}
           </tbody>
@@ -82,7 +82,7 @@ export function TableViz({ rows, meta }: { rows: QueryRow[]; meta: QueryMeta }) 
       <div className="overflow-x-auto">
         <table className="w-full text-xs">
           <thead>
-            <tr className="border-b border-ink-700 text-zinc-500">
+            <tr className="border-b border-border bg-subtle text-muted">
               {rowDims.map((d) => (
                 <th key={d} className="px-2 py-1.5 text-left font-medium">
                   {DIM_META[d].label}
@@ -99,17 +99,17 @@ export function TableViz({ rows, meta }: { rows: QueryRow[]; meta: QueryMeta }) 
           </thead>
           <tbody>
             {rowKeys.map((rk) => (
-              <tr key={rk} className="border-b border-ink-800/60">
+              <tr key={rk} className="border-b border-border-hair hover:bg-subtle">
                 {rowLabelParts(rk).map((p, i) => (
-                  <td key={i} className="max-w-[160px] truncate px-2 py-1.5 text-zinc-300" title={p}>
+                  <td key={i} className="max-w-[160px] truncate px-2 py-1.5 text-body" title={p}>
                     {p || "—"}
                   </td>
                 ))}
                 {colKeys.map((ck) => {
                   const v = get(rk, ck);
                   return (
-                    <td key={ck} className="tnum px-2 py-1.5 text-right text-zinc-100">
-                      {v == null ? <span className="text-zinc-700">·</span> : fmtValue(v, meta.unit)}
+                    <td key={ck} className="tnum px-2 py-1.5 text-right text-strong">
+                      {v == null ? <span className="text-faint">—</span> : fmtValue(v, meta.unit)}
                     </td>
                   );
                 })}

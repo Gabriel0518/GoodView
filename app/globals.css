@@ -3,19 +3,20 @@
 @tailwind utilities;
 
 :root {
-  color-scheme: dark;
+  color-scheme: light;
 }
 
 html,
 body {
-  background: #08080a;
-  color: #e7e7ea;
+  background: #f7f8fa; /* canvas */
+  color: #374151; /* body */
+  font-family: Inter, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
 }
 
-/* 数字用等宽，表格更整齐 */
+/* 数字用等宽（tabular-nums），表格/指标对齐更整齐 */
 .tnum {
   font-variant-numeric: tabular-nums;
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
 ::-webkit-scrollbar {
@@ -23,6 +24,17 @@ body {
   width: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #33333f;
+  background: #e5e7eb; /* border */
   border-radius: 6px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #d1d5db;
+}
+
+/* react-grid-layout 拖拽占位/手柄在浅色下的观感 */
+.react-grid-item.react-grid-placeholder {
+  background: #eef2ff; /* accent-soft */
+  border: 1px dashed #4f46e5;
+  border-radius: 12px;
+  opacity: 0.6;
 }

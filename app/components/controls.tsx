@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { cn } from "../lib/util";
 
+// 浅色 SaaS 下拉/多选/日期控件（UI-设计需求.md §4.2）。
+
 // 点击外部关闭的弹出层
 export function Popover({
   trigger,
@@ -29,7 +31,7 @@ export function Popover({
     <div className="relative inline-block" ref={ref}>
       <button onClick={() => setOpen((v) => !v)}>{trigger(open)}</button>
       {open && (
-        <div className={cn("absolute z-30 mt-1 rounded-xl border border-ink-700 bg-ink-850 p-2 shadow-xl", width, align === "right" ? "right-0" : "left-0")}>
+        <div className={cn("absolute z-30 mt-1 rounded-xl border border-border bg-surface p-2 shadow-md", width, align === "right" ? "right-0" : "left-0")}>
           {children(() => setOpen(false))}
         </div>
       )}
@@ -38,7 +40,7 @@ export function Popover({
 }
 
 const triggerCls =
-  "flex items-center gap-1.5 rounded-lg border border-ink-700 bg-ink-850 px-3 py-1.5 text-xs text-zinc-200 hover:border-ink-600";
+  "flex items-center gap-1.5 rounded-lg border border-border bg-surface px-3 py-1.5 text-xs text-body transition hover:bg-subtle";
 
 // 多选下拉（可搜索）
 export function MultiSelect({
@@ -66,9 +68,9 @@ export function MultiSelect({
       width="w-80"
       trigger={() => (
         <span className={triggerCls}>
-          <span className="text-zinc-500">{label}</span>
-          <span className="font-medium">{selected.length ? `${selected.length} 项` : emptyLabel}</span>
-          <span className="text-zinc-600">▾</span>
+          <span className="text-muted">{label}</span>
+          <span className="font-medium text-strong">{selected.length ? `${selected.length} 项` : emptyLabel}</span>
+          <span className="text-faint">▾</span>
         </span>
       )}
     >
@@ -80,23 +82,23 @@ export function MultiSelect({
               value={q}
               onChange={(e) => setQ(e.target.value)}
               placeholder="搜索…"
-              className="mb-2 w-full rounded-lg border border-ink-700 bg-ink-900 px-2 py-1.5 text-xs text-zinc-200 outline-none focus:border-accent"
+              className="mb-2 w-full rounded-lg border border-border bg-surface px-2 py-1.5 text-xs text-body outline-none placeholder:text-faint focus:border-accent focus:ring-2 focus:ring-accent/20"
             />
           )}
           <div className="mb-2 flex items-center justify-between text-xs">
-            <button className="text-accent-soft hover:underline" onClick={() => onChange(options.map((o) => o.value))}>全选</button>
-            <span className="text-zinc-600">{selected.length}/{options.length}</span>
-            <button className="text-zinc-400 hover:underline" onClick={() => onChange([])}>清空</button>
+            <button className="text-accent hover:underline" onClick={() => onChange(options.map((o) => o.value))}>全选</button>
+            <span className="text-faint">{selected.length}/{options.length}</span>
+            <button className="text-muted hover:underline" onClick={() => onChange([])}>清空</button>
           </div>
           <div className="max-h-64 space-y-0.5 overflow-y-auto">
             {filtered.map((o) => (
-              <label key={o.value} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-xs hover:bg-ink-800">
+              <label key={o.value} className="flex cursor-pointer items-center gap-2 rounded-md px-2 py-1 text-xs hover:bg-subtle">
                 <input type="checkbox" checked={sel.has(o.value)} onChange={() => toggle(o.value)} className="accent-accent" />
-                <span className="flex-1 truncate text-zinc-200" title={o.label}>{o.label}</span>
-                {o.hint && <span className="shrink-0 text-[10px] text-zinc-600">{o.hint}</span>}
+                <span className="flex-1 truncate text-body" title={o.label}>{o.label}</span>
+                {o.hint && <span className="shrink-0 text-[10px] text-faint">{o.hint}</span>}
               </label>
             ))}
-            {!filtered.length && <div className="px-2 py-3 text-center text-xs text-zinc-600">无匹配</div>}
+            {!filtered.length && <div className="px-2 py-3 text-center text-xs text-faint">无匹配</div>}
           </div>
         </div>
       )}
@@ -122,9 +124,9 @@ export function Select({
       width="w-56"
       trigger={() => (
         <span className={triggerCls}>
-          <span className="text-zinc-500">{label}</span>
-          <span className="font-medium">{cur?.label ?? value}</span>
-          <span className="text-zinc-600">▾</span>
+          <span className="text-muted">{label}</span>
+          <span className="font-medium text-strong">{cur?.label ?? value}</span>
+          <span className="text-faint">▾</span>
         </span>
       )}
     >
@@ -137,12 +139,12 @@ export function Select({
               onClick={() => { if (!o.disabled) { onChange(o.value); close(); } }}
               className={cn(
                 "flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs",
-                o.value === value ? "bg-accent/20 text-accent-soft" : "text-zinc-200 hover:bg-ink-800",
-                o.disabled && "cursor-not-allowed text-zinc-600",
+                o.value === value ? "bg-accent-soft text-accent" : "text-body hover:bg-subtle",
+                o.disabled && "cursor-not-allowed text-faint",
               )}
             >
               <span className="truncate">{o.label}</span>
-              {o.disabled && <span className="text-[10px] text-zinc-600">待补充</span>}
+              {o.disabled && <span className="text-[10px] text-faint">待补充</span>}
             </button>
           ))}
         </div>
@@ -166,7 +168,6 @@ export function DateRangePicker({
   onChange: (from: string, to: string) => void;
 }) {
   const shift = (days: number) => {
-    // 从 max 往前 days 天
     const d = new Date(max + "T00:00:00");
     d.setDate(d.getDate() - (days - 1));
     const f = d.toISOString().slice(0, 10);
@@ -184,9 +185,9 @@ export function DateRangePicker({
       width="w-72"
       trigger={() => (
         <span className={triggerCls}>
-          <span className="text-zinc-500">日期</span>
-          <span className="tnum font-medium">{from} → {to}</span>
-          <span className="text-zinc-600">▾</span>
+          <span className="text-muted">日期</span>
+          <span className="tnum font-medium text-strong">{from} → {to}</span>
+          <span className="text-faint">▾</span>
         </span>
       )}
     >
@@ -194,18 +195,18 @@ export function DateRangePicker({
         <div className="space-y-2">
           <div className="flex flex-wrap gap-1">
             {presets.map((p) => (
-              <button key={p.days} onClick={() => shift(p.days)} className="rounded-md border border-ink-700 bg-ink-900 px-2 py-1 text-xs text-zinc-300 hover:border-accent">
+              <button key={p.days} onClick={() => shift(p.days)} className="rounded-md border border-border bg-surface px-2 py-1 text-xs text-body hover:border-accent hover:text-accent">
                 {p.label}
               </button>
             ))}
-            <button onClick={() => onChange(min, max)} className="rounded-md border border-ink-700 bg-ink-900 px-2 py-1 text-xs text-zinc-300 hover:border-accent">全部</button>
+            <button onClick={() => onChange(min, max)} className="rounded-md border border-border bg-surface px-2 py-1 text-xs text-body hover:border-accent hover:text-accent">全部</button>
           </div>
           <div className="flex items-center gap-2">
-            <input type="date" value={from} min={min} max={to} onChange={(e) => onChange(e.target.value, to)} className="w-full rounded-lg border border-ink-700 bg-ink-900 px-2 py-1 text-xs text-zinc-200" />
-            <span className="text-zinc-600">→</span>
-            <input type="date" value={to} min={from} max={max} onChange={(e) => onChange(from, e.target.value)} className="w-full rounded-lg border border-ink-700 bg-ink-900 px-2 py-1 text-xs text-zinc-200" />
+            <input type="date" value={from} min={min} max={to} onChange={(e) => onChange(e.target.value, to)} className="w-full rounded-lg border border-border bg-surface px-2 py-1 text-xs text-body focus:border-accent focus:ring-2 focus:ring-accent/20" />
+            <span className="text-faint">→</span>
+            <input type="date" value={to} min={from} max={max} onChange={(e) => onChange(from, e.target.value)} className="w-full rounded-lg border border-border bg-surface px-2 py-1 text-xs text-body focus:border-accent focus:ring-2 focus:ring-accent/20" />
           </div>
-          <button onClick={close} className="w-full rounded-lg bg-accent py-1.5 text-xs font-medium text-white hover:bg-accent-soft">完成</button>
+          <button onClick={close} className="w-full rounded-lg bg-accent py-1.5 text-xs font-medium text-white hover:bg-accent-600">完成</button>
         </div>
       )}
     </Popover>

@@ -44,7 +44,7 @@ export function LineViz({ rows, meta }: { rows: QueryRow[]; meta: QueryMeta }) {
       {seriesDim && series.length > 1 && (
         <div className="flex flex-wrap gap-x-3 gap-y-1">
           {series.map((s) => (
-            <span key={s.name} className="inline-flex items-center gap-1 text-[11px] text-zinc-400">
+            <span key={s.name} className="inline-flex items-center gap-1 text-[11px] text-muted">
               <span className="inline-block h-2 w-2 rounded-sm" style={{ background: s.color }} />
               <span className="max-w-[140px] truncate" title={s.name}>
                 {s.name}
@@ -58,5 +58,5 @@ export function LineViz({ rows, meta }: { rows: QueryRow[]; meta: QueryMeta }) {
 }
 
 function Empty() {
-  return <div className="py-8 text-center text-xs text-zinc-600">无数据</div>;
+  return <div className="py-8 text-center text-xs text-muted">无数据</div>;
 }

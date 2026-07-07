@@ -71,43 +71,39 @@ export function BoardList() {
     <main className="mx-auto max-w-5xl space-y-4 px-4 py-6">
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h1 className="text-lg font-semibold text-zinc-100">看板</h1>
-          <p className="mt-1 text-xs text-zinc-500">自助搭建广告转化看板 · 选度量 → 配维度 → 拖拽栅格 → AI 解读</p>
-          <div className="mt-1.5 flex items-center gap-3 text-xs">
-            <Link href="/admin/groups" className="text-zinc-500 hover:text-accent-soft">管理分组</Link>
-            <Link href="/legacy" className="text-zinc-500 hover:text-accent-soft">旧版看板</Link>
-          </div>
+          <h1 className="text-lg font-semibold text-strong">看板</h1>
+          <p className="mt-1 text-xs text-muted">自助搭建广告转化看板 · 选度量 → 配维度 → 拖拽栅格 → AI 解读</p>
         </div>
         <Button variant="primary" onClick={create} disabled={busy === "new"}>
           {busy === "new" ? "创建中…" : "+ 新建看板"}
         </Button>
       </div>
 
-      {err && <div className="rounded-xl border border-red-500/30 bg-red-500/10 px-4 py-3 text-xs text-red-300">{err}</div>}
+      {err && <div className="rounded-xl border border-danger/30 bg-danger-soft px-4 py-3 text-xs text-danger">{err}</div>}
 
       <Panel title="全部看板" subtitle={boards ? `${boards.length} 个` : undefined} action={<Button variant="ghost" onClick={load} disabled={loading}>{loading ? "加载中…" : "刷新"}</Button>}>
         {loading ? (
-          <div className="py-10 text-center text-xs text-zinc-600">加载中…</div>
+          <div className="py-10 text-center text-xs text-muted">加载中…</div>
         ) : !boards || boards.length === 0 ? (
-          <div className="py-10 text-center text-xs text-zinc-600">还没有看板。点击右上角「新建看板」创建第一个。</div>
+          <div className="py-10 text-center text-xs text-muted">还没有看板。点击右上角「新建看板」创建第一个。</div>
         ) : (
-          <div className="grid gap-2 sm:grid-cols-2">
+          <div className="grid gap-3 sm:grid-cols-2 lg:grid-cols-3">
             {boards.map((b) => (
               <div
                 key={b.id}
                 className={cn(
-                  "flex flex-col justify-between gap-3 rounded-xl border border-ink-700 bg-ink-850 p-4",
+                  "flex flex-col justify-between gap-3 rounded-xl border border-border bg-surface p-4 shadow-sm transition hover:shadow-hover",
                   busy === b.id && "opacity-60",
                 )}
               >
                 <div className="flex items-start justify-between gap-2">
                   <Link href={`/dashboard/${b.id}`} className="min-w-0 flex-1">
                     <div className="flex items-center gap-2">
-                      <span className="truncate text-sm font-medium text-zinc-100 hover:text-accent-soft" title={b.name}>
+                      <span className="truncate text-sm font-medium text-strong hover:text-accent" title={b.name}>
                         {b.name}
                       </span>
                       {b.is_template && (
-                        <span className="shrink-0 rounded bg-accent/20 px-1.5 py-0.5 text-[10px] font-medium text-accent-soft">模板</span>
+                        <span className="shrink-0 rounded-full bg-accent-soft px-2 py-0.5 text-[10px] font-medium text-accent">模板</span>
                       )}
                     </div>
                   </Link>

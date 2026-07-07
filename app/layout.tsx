@@ -1,15 +1,18 @@
 import type { Metadata } from "next";
 import "./globals.css";
+import { AppShell } from "./components/AppShell";
 
 export const metadata: Metadata = {
-  title: "广告转化看板",
+  title: "GoodView · 广告转化看板",
   description: "广告投放 → 转化漏斗 数据看板",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
   return (
     <html lang="zh-CN">
-      <body className="min-h-screen bg-ink-950 text-zinc-200 antialiased">{children}</body>
+      <body className="bg-canvas text-body antialiased">
+        <AppShell>{children}</AppShell>
+      </body>
     </html>
   );
 }

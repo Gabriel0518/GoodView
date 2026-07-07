@@ -13,7 +13,7 @@ export function MeasurePicker({ value, onChange }: { value: string; onChange: (k
         if (!ms.length) return null;
         return (
           <div key={group}>
-            <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-zinc-600">{group}</div>
+            <div className="mb-1.5 text-[11px] font-medium uppercase tracking-wide text-muted">{group}</div>
             <div className="flex flex-wrap gap-1.5">
               {ms.map((m) => (
                 <button
@@ -23,8 +23,8 @@ export function MeasurePicker({ value, onChange }: { value: string; onChange: (k
                   className={cn(
                     "rounded-lg border px-2.5 py-1.5 text-xs transition",
                     value === m.key
-                      ? "border-accent bg-accent/20 text-accent-soft"
-                      : "border-ink-700 bg-ink-850 text-zinc-300 hover:border-ink-600 hover:text-zinc-100",
+                      ? "border-accent bg-accent-soft text-accent"
+                      : "border-border bg-surface text-body hover:bg-subtle",
                   )}
                 >
                   {m.label}
@@ -35,7 +35,7 @@ export function MeasurePicker({ value, onChange }: { value: string; onChange: (k
         );
       })}
       {selected?.note && (
-        <p className="rounded-lg border border-ink-700 bg-ink-900/60 px-3 py-2 text-[11px] leading-snug text-zinc-500">
+        <p className="rounded-lg border border-border bg-subtle px-3 py-2 text-[11px] leading-snug text-muted">
           ⓘ {selected.note}
         </p>
       )}

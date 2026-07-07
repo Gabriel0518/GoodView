@@ -29,11 +29,11 @@ export function VizRenderer({
     <div className="flex h-full flex-col">
       <div className="min-h-0 flex-1">
         {error ? (
-          <div className="py-6 text-center text-xs text-red-400">查询失败：{error}</div>
+          <div className="rounded-lg border border-danger/30 bg-danger-soft py-6 text-center text-xs text-danger">查询失败：{error}</div>
         ) : loading && !meta ? (
-          <div className="py-8 text-center text-xs text-zinc-600">加载中…</div>
+          <div className="py-8 text-center text-xs text-muted">加载中…</div>
         ) : !meta ? (
-          <div className="py-8 text-center text-xs text-zinc-600">配置卡片后预览</div>
+          <div className="py-8 text-center text-xs text-muted">配置卡片后预览</div>
         ) : (
           <div className={loading ? "opacity-60 transition-opacity" : "transition-opacity"}>
             <Body viz={viz} rows={rows} meta={meta} />
@@ -67,10 +67,10 @@ function Footer({ meta, note }: { meta: QueryMeta | null; note?: string }) {
   const warnings = meta?.warnings ?? [];
   if (!caption && warnings.length === 0) return null;
   return (
-    <div className="mt-2 space-y-1 border-t border-ink-800 pt-2">
-      {caption && <p className="text-[11px] leading-snug text-zinc-600">ⓘ {caption}</p>}
+    <div className="mt-2 space-y-1 border-t border-border-hair pt-2">
+      {caption && <p className="text-[11px] leading-snug text-muted">ⓘ {caption}</p>}
       {warnings.map((w, i) => (
-        <p key={i} className="text-[11px] leading-snug text-amber-400/80">
+        <p key={i} className="text-[11px] leading-snug text-warning">
           ⚠ {w}
         </p>
       ))}

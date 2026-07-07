@@ -55,7 +55,7 @@ export function BoardGrid({
 
   if (!cards.length) {
     return (
-      <div className="rounded-xl border border-dashed border-ink-700 px-4 py-16 text-center text-sm text-zinc-600">
+      <div className="rounded-xl border border-dashed border-border px-4 py-16 text-center text-sm text-muted">
         还没有卡片。点击「+ 添加卡片」开始搭建。
       </div>
     );
@@ -108,16 +108,16 @@ function CardView({
   const note = getMeasure(cfg?.measure)?.note;
 
   return (
-    <div className="flex h-full flex-col overflow-hidden rounded-xl border border-ink-700 bg-ink-900/60">
-      <header className="card-drag flex cursor-move items-center justify-between gap-2 border-b border-ink-700 px-3 py-1.5">
-        <span className="truncate text-xs font-semibold text-zinc-200" title={card.title}>
+    <div className="flex h-full flex-col overflow-hidden rounded-xl border border-border bg-surface shadow-sm transition hover:shadow-hover">
+      <header className="card-drag flex cursor-move items-center justify-between gap-2 border-b border-border px-3 py-1.5">
+        <span className="truncate text-xs font-semibold text-strong" title={card.title}>
           {card.title}
         </span>
         <div className="flex shrink-0 items-center gap-1" onMouseDown={(e) => e.stopPropagation()}>
-          <button onClick={onEdit} className="rounded px-1.5 py-0.5 text-[11px] text-zinc-500 hover:text-zinc-200" title="编辑">
+          <button onClick={onEdit} className="rounded px-1.5 py-0.5 text-[11px] text-muted hover:text-body" title="编辑">
             编辑
           </button>
-          <button onClick={onDelete} className="rounded px-1.5 py-0.5 text-[11px] text-zinc-600 hover:text-red-400" title="删除">
+          <button onClick={onDelete} className="rounded px-1.5 py-0.5 text-[11px] text-faint hover:text-danger" title="删除">
             ✕
           </button>
         </div>

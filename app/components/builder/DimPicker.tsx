@@ -60,20 +60,20 @@ export function DimPicker({
               title={!allowed ? reason ?? undefined : atCap ? `最多 ${maxDims} 个维度` : DIM_META[dim].label}
               className={cn(
                 "inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-xs transition",
-                selected && "border-accent bg-accent/20 text-accent-soft",
-                !selected && allowed && !atCap && "border-ink-700 bg-ink-850 text-zinc-300 hover:border-ink-600",
-                !selected && allowed && atCap && "border-ink-800 bg-ink-850 text-zinc-500",
-                !allowed && "cursor-not-allowed border-ink-800 bg-ink-900/40 text-zinc-700",
+                selected && "border-accent bg-accent-soft text-accent",
+                !selected && allowed && !atCap && "border-border bg-surface text-body hover:bg-subtle",
+                !selected && allowed && atCap && "border-border bg-subtle text-faint",
+                !allowed && "cursor-not-allowed border-border bg-subtle text-faint",
               )}
             >
               {DIM_META[dim].label}
-              {selected && <span className="rounded bg-accent/30 px-1 text-[9px] text-accent-soft">{POS_LABEL[pos]}</span>}
+              {selected && <span className="rounded bg-accent/15 px-1 text-[9px] text-accent">{POS_LABEL[pos]}</span>}
               {!allowed && <span className="text-[10px]">🔒</span>}
             </button>
           );
         })}
       </div>
-      <p className="text-[11px] text-zinc-600">
+      <p className="text-[11px] text-muted">
         {dims.length === 0
           ? "未选维度 → 数字卡（单值）"
           : `已选 ${dims.length}/${maxDims} 维 · 顺序即 ${dims.map((d, i) => `${POS_LABEL[i]}=${DIM_META[d].label}`).join(" · ")}`}

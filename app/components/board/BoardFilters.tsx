@@ -38,7 +38,7 @@ export function BoardFiltersBar({
   ];
 
   return (
-    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-ink-700 bg-ink-900/60 px-3 py-2">
+    <div className="flex flex-wrap items-center gap-2 rounded-xl border border-border bg-surface px-3 py-2 shadow-sm">
       <Select
         label="数据源"
         value={filters.groupId != null ? String(filters.groupId) : ""}
@@ -59,20 +59,20 @@ export function BoardFiltersBar({
             value={filters.dateFrom ?? ""}
             max={filters.dateTo || undefined}
             onChange={(e) => patch({ dateFrom: e.target.value })}
-            className="rounded-lg border border-ink-700 bg-ink-900 px-2 py-1 text-xs text-zinc-200"
+            className="rounded-lg border border-border bg-surface px-2 py-1 text-xs text-body focus:border-accent focus:ring-2 focus:ring-accent/20"
           />
-          <span className="text-zinc-600">→</span>
+          <span className="text-faint">→</span>
           <input
             type="date"
             value={filters.dateTo ?? ""}
             min={filters.dateFrom || undefined}
             onChange={(e) => patch({ dateTo: e.target.value })}
-            className="rounded-lg border border-ink-700 bg-ink-900 px-2 py-1 text-xs text-zinc-200"
+            className="rounded-lg border border-border bg-surface px-2 py-1 text-xs text-body focus:border-accent focus:ring-2 focus:ring-accent/20"
           />
         </div>
       )}
 
-      <span className="mx-1 h-4 w-px bg-ink-700" />
+      <span className="mx-1 h-4 w-px bg-border" />
 
       <Segmented options={GRANS} value={filters.granularity} onChange={(g) => patch({ granularity: g })} />
     </div>

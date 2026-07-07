@@ -1,5 +1,7 @@
 import { cn } from "../lib/util";
 
+// 浅色 SaaS 基础组件（UI-设计需求.md §4）。
+
 export function Panel({
   title,
   subtitle,
@@ -14,12 +16,12 @@ export function Panel({
   className?: string;
 }) {
   return (
-    <section className={cn("rounded-xl border border-ink-700 bg-ink-900/60 p-4", className)}>
+    <section className={cn("rounded-xl border border-border bg-surface p-5 shadow-sm", className)}>
       {(title || action) && (
-        <header className="mb-3 flex items-center justify-between gap-3">
+        <header className="mb-4 flex items-center justify-between gap-3">
           <div>
-            {title && <h2 className="text-sm font-semibold text-zinc-100">{title}</h2>}
-            {subtitle && <p className="mt-0.5 text-xs text-zinc-500">{subtitle}</p>}
+            {title && <h2 className="text-[15px] font-medium text-strong">{title}</h2>}
+            {subtitle && <p className="mt-0.5 text-xs text-muted">{subtitle}</p>}
           </div>
           {action}
         </header>
@@ -31,10 +33,10 @@ export function Panel({
 
 export function StatCard({ label, value, sub, accent }: { label: string; value: string; sub?: string; accent?: boolean }) {
   return (
-    <div className="rounded-xl border border-ink-700 bg-ink-850 px-4 py-3">
-      <div className="text-xs text-zinc-500">{label}</div>
-      <div className={cn("tnum mt-1 text-xl font-semibold", accent ? "text-accent-soft" : "text-zinc-100")}>{value}</div>
-      {sub && <div className="tnum mt-0.5 text-xs text-zinc-500">{sub}</div>}
+    <div className="rounded-xl border border-border bg-surface px-5 py-4 shadow-sm">
+      <div className="text-xs text-muted">{label}</div>
+      <div className={cn("tnum mt-1 text-[28px] font-semibold leading-tight", accent ? "text-accent" : "text-strong")}>{value}</div>
+      {sub && <div className="tnum mt-1 text-xs text-muted">{sub}</div>}
     </div>
   );
 }
@@ -45,23 +47,27 @@ export function Button({
   variant = "default",
   disabled,
   title,
+  type,
 }: {
   children: React.ReactNode;
   onClick?: () => void;
-  variant?: "default" | "primary" | "ghost";
+  variant?: "default" | "primary" | "ghost" | "danger";
   disabled?: boolean;
   title?: string;
+  type?: "button" | "submit";
 }) {
   return (
     <button
+      type={type || "button"}
       onClick={onClick}
       disabled={disabled}
       title={title}
       className={cn(
-        "rounded-lg px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50",
-        variant === "primary" && "bg-accent text-white hover:bg-accent-soft",
-        variant === "default" && "border border-ink-600 bg-ink-800 text-zinc-200 hover:border-ink-600 hover:bg-ink-700",
-        variant === "ghost" && "text-zinc-400 hover:text-zinc-100",
+        "inline-flex items-center justify-center gap-1.5 rounded-lg px-3 py-1.5 text-xs font-medium transition disabled:cursor-not-allowed disabled:opacity-50",
+        variant === "primary" && "bg-accent text-white shadow-sm hover:bg-accent-600",
+        variant === "default" && "border border-border bg-surface text-body hover:bg-subtle",
+        variant === "ghost" && "text-muted hover:bg-subtle hover:text-body",
+        variant === "danger" && "border border-danger/30 bg-surface text-danger hover:bg-danger-soft",
       )}
     >
       {children}
@@ -79,14 +85,14 @@ export function Segmented<T extends string>({
   onChange: (v: T) => void;
 }) {
   return (
-    <div className="inline-flex rounded-lg border border-ink-700 bg-ink-850 p-0.5">
+    <div className="inline-flex rounded-lg border border-border bg-subtle p-0.5">
       {options.map((o) => (
         <button
           key={o.value}
           onClick={() => onChange(o.value)}
           className={cn(
             "rounded-md px-3 py-1 text-xs font-medium transition",
-            value === o.value ? "bg-accent text-white" : "text-zinc-400 hover:text-zinc-100",
+            value === o.value ? "bg-surface text-accent shadow-sm" : "text-muted hover:text-body",
           )}
         >
           {o.label}
@@ -94,4 +100,16 @@ export function Segmented<T extends string>({
       ))}
     </div>
   );
+}
+
+// 徽章/Pill（§4.4）
+export function Badge({ children, tone = "neutral" }: { children: React.ReactNode; tone?: "neutral" | "accent" | "success" | "danger" | "warning" }) {
+  const tones: Record<string, string> = {
+    neutral: "bg-subtle text-muted",
+    accent: "bg-accent-soft text-accent",
+    success: "bg-success-soft text-success",
+    danger: "bg-danger-soft text-danger",
+    warning: "bg-warning-soft text-warning",
+  };
+  return <span className={cn("inline-flex items-center rounded-full px-2 py-0.5 text-[11px] font-medium", tones[tone])}>{children}</span>;
 }

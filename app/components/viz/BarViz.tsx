@@ -46,8 +46,8 @@ export function BarViz({ rows, meta }: { rows: QueryRow[]; meta: QueryMeta }) {
       <svg viewBox={`0 0 ${w} ${h}`} className="w-full" style={{ height: h }}>
         {grid.map((g, i) => (
           <g key={i}>
-            <line x1={padL} x2={w - padR} y1={Y(g)} y2={Y(g)} stroke="#26262f" strokeWidth={1} />
-            <text x={padL - 8} y={Y(g) + 3} textAnchor="end" fontSize={10} fill="#71717a" className="tnum">
+            <line x1={padL} x2={w - padR} y1={Y(g)} y2={Y(g)} stroke="#F1F3F5" strokeWidth={1} />
+            <text x={padL - 8} y={Y(g) + 3} textAnchor="end" fontSize={10} fill="#9CA3AF" className="tnum">
               {fmtValue(g, meta.unit)}
             </text>
           </g>
@@ -67,7 +67,7 @@ export function BarViz({ rows, meta }: { rows: QueryRow[]; meta: QueryMeta }) {
                 y={h - 28}
                 textAnchor="middle"
                 fontSize={10}
-                fill="#71717a"
+                fill="#9CA3AF"
               >
                 {truncate(c, 10)}
               </text>
@@ -77,10 +77,10 @@ export function BarViz({ rows, meta }: { rows: QueryRow[]; meta: QueryMeta }) {
       </svg>
       <div className="flex flex-wrap gap-x-3 gap-y-1">
         {seriesDim && (
-          <span className="text-[11px] text-zinc-600">{DIM_META[seriesDim].label}：</span>
+          <span className="text-[11px] text-muted">{DIM_META[seriesDim].label}：</span>
         )}
         {seriesNames.map((s, si) => (
-          <span key={s} className="inline-flex items-center gap-1 text-[11px] text-zinc-400">
+          <span key={s} className="inline-flex items-center gap-1 text-[11px] text-muted">
             <span className="inline-block h-2 w-2 rounded-sm" style={{ background: colorAt(si) }} />
             <span className="max-w-[140px] truncate" title={s}>
               {s}
@@ -95,5 +95,5 @@ export function BarViz({ rows, meta }: { rows: QueryRow[]; meta: QueryMeta }) {
 const truncate = (s: string, n: number) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
 
 function Empty() {
-  return <div className="py-8 text-center text-xs text-zinc-600">无数据</div>;
+  return <div className="py-8 text-center text-xs text-muted">无数据</div>;
 }

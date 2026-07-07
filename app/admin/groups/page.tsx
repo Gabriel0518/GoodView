@@ -198,8 +198,8 @@ export default function GroupsPage() {
       {/* 头部 */}
       <div className="flex items-start justify-between gap-3">
         <div>
-          <h1 className="text-lg font-semibold text-zinc-100">广告分组</h1>
-          <p className="mt-1 max-w-xl text-xs text-zinc-500">
+          <h1 className="text-lg font-semibold text-strong">广告分组</h1>
+          <p className="mt-1 max-w-xl text-xs text-muted">
             把某个 App 的广告账户/系列编成组，成本只按组内花费算。用于将不同 App 的投放花费彼此隔离。
           </p>
         </div>
@@ -210,7 +210,7 @@ export default function GroupsPage() {
 
       {/* 候选拉取失败提示 */}
       {candErr && (
-        <div className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-4 py-3 text-xs text-amber-300">
+        <div className="rounded-xl border border-warning/30 bg-warning-soft px-4 py-3 text-xs text-warning">
           无法加载候选账户/系列（{candErr}）。请先运行数据拉取 / 迁移，再回来创建分组。
         </div>
       )}
@@ -235,15 +235,15 @@ export default function GroupsPage() {
             {/* 名称 + App组开关 */}
             <div className="flex flex-wrap items-center gap-4">
               <div className="flex-1 min-w-[220px]">
-                <label className="mb-1 block text-xs text-zinc-500">组名称</label>
+                <label className="mb-1 block text-xs text-muted">组名称</label>
                 <input
                   value={draft.name}
                   onChange={(e) => setDraft((d) => (d ? { ...d, name: e.target.value } : d))}
                   placeholder="例如：PWA · 653834"
-                  className="w-full rounded-lg border border-ink-700 bg-ink-900 px-3 py-2 text-sm text-zinc-200 outline-none focus:border-accent"
+                  className="w-full rounded-lg border border-border bg-surface px-3 py-2 text-sm text-body outline-none placeholder:text-faint focus:border-accent focus:ring-2 focus:ring-accent/20"
                 />
               </div>
-              <label className="mt-5 flex cursor-pointer items-center gap-2 text-xs text-zinc-300">
+              <label className="mt-5 flex cursor-pointer items-center gap-2 text-xs text-body">
                 <input
                   type="checkbox"
                   checked={draft.is_app_group}
@@ -272,8 +272,8 @@ export default function GroupsPage() {
                 searchable
                 emptyLabel="选择系列"
               />
-              <span className="text-xs text-zinc-600">
-                已选 {draftMembers.length} 项 · 组内花费 <span className="tnum text-accent-soft">{fmtMoney(draftCost)}</span>
+              <span className="text-xs text-muted">
+                已选 {draftMembers.length} 项 · 组内花费 <span className="tnum text-accent">{fmtMoney(draftCost)}</span>
               </span>
             </div>
 
@@ -283,12 +283,12 @@ export default function GroupsPage() {
                 {draftMembers.map((m) => (
                   <span
                     key={`${m.type}:${m.id}`}
-                    className="inline-flex items-center gap-1.5 rounded-lg border border-ink-700 bg-ink-850 px-2.5 py-1 text-xs text-zinc-200"
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-border bg-subtle px-2.5 py-1 text-xs text-body"
                   >
                     <span
                       className={cn(
                         "rounded px-1 py-0.5 text-[10px] font-medium",
-                        m.type === "account" ? "bg-accent/20 text-accent-soft" : "bg-ink-700 text-zinc-400",
+                        m.type === "account" ? "bg-accent-soft text-accent" : "bg-border text-muted",
                       )}
                     >
                       {m.type === "account" ? "账户" : "系列"}
@@ -298,7 +298,7 @@ export default function GroupsPage() {
                     </span>
                     <button
                       onClick={() => removeMember(m.type, m.id)}
-                      className="text-zinc-600 hover:text-zinc-200"
+                      className="text-faint hover:text-body"
                       title="移除"
                     >
                       ✕
@@ -307,12 +307,12 @@ export default function GroupsPage() {
                 ))}
               </div>
             ) : (
-              <div className="rounded-lg border border-dashed border-ink-700 px-3 py-4 text-center text-xs text-zinc-600">
+              <div className="rounded-lg border border-dashed border-border px-3 py-4 text-center text-xs text-muted">
                 {candidatesEmpty ? "暂无可选账户/系列，请先拉取数据" : "尚未选择成员 · 至少选择一个账户或系列"}
               </div>
             )}
 
-            {saveErr && <div className="text-xs text-red-400">保存失败：{saveErr}</div>}
+            {saveErr && <div className="text-xs text-danger">保存失败：{saveErr}</div>}
           </div>
         </Panel>
       )}
@@ -328,14 +328,14 @@ export default function GroupsPage() {
         }
       >
         {loading ? (
-          <div className="py-8 text-center text-xs text-zinc-600">加载中…</div>
+          <div className="py-8 text-center text-xs text-muted">加载中…</div>
         ) : err ? (
           <div className="space-y-2 py-6 text-center">
-            <div className="text-xs text-red-400">加载失败：{err}</div>
-            <div className="text-[11px] text-zinc-600">若 /api/groups 尚未上线，请等待后端接口就绪。</div>
+            <div className="text-xs text-danger">加载失败：{err}</div>
+            <div className="text-[11px] text-muted">若 /api/groups 尚未上线，请等待后端接口就绪。</div>
           </div>
         ) : !groups || groups.length === 0 ? (
-          <div className="py-8 text-center text-xs text-zinc-600">
+          <div className="py-8 text-center text-xs text-muted">
             还没有分组。点击右上角「新建组」创建第一个。
           </div>
         ) : (
@@ -346,22 +346,22 @@ export default function GroupsPage() {
               return (
                 <div
                   key={g.id}
-                  className="flex items-center justify-between gap-3 rounded-xl border border-ink-700 bg-ink-850 px-4 py-3"
+                  className="flex items-center justify-between gap-3 rounded-xl border border-border bg-surface px-4 py-3 transition hover:bg-subtle"
                 >
                   <div className="min-w-0">
                     <div className="flex items-center gap-2">
-                      <span className="truncate text-sm font-medium text-zinc-100" title={g.name}>
+                      <span className="truncate text-sm font-medium text-strong" title={g.name}>
                         {g.name}
                       </span>
                       {g.is_app_group && (
-                        <span className="shrink-0 rounded bg-accent/20 px-1.5 py-0.5 text-[10px] font-medium text-accent-soft">
+                        <span className="shrink-0 rounded-full bg-accent-soft px-2 py-0.5 text-[10px] font-medium text-accent">
                           App组
                         </span>
                       )}
                     </div>
-                    <div className="mt-0.5 text-xs text-zinc-500">
+                    <div className="mt-0.5 text-xs text-muted">
                       {g.members.length} 个成员
-                      <span className="text-zinc-600">
+                      <span className="text-faint">
                         {" "}
                         · {accCount} 账户 · {campCount} 系列
                       </span>

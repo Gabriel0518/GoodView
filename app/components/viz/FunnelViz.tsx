@@ -2,14 +2,23 @@
 
 import type { QueryRow, QueryMeta } from "../../lib/query-types";
 import type { DimKey } from "../../lib/metrics";
-import { fmtValue, colorAt } from "./format";
+import { fmtValue } from "./format";
 
 // 漏斗图：X=阶段（dims[0]），按漏斗顺序（引擎已按 ord 排序，不再重排）水平条。
-// 转化率 = 相对漏斗顶（第一阶段）的占比。
+// 转化率 = 相对漏斗顶（第一阶段）的占比。条形用 accent 渐深（§4.8）。
+// 在 indigo-500(#6366F1) → indigo-800(#3730A3) 间按层级插值。
+function funnelShade(i: number, n: number): string {
+  const from = [0x63, 0x66, 0xf1];
+  const to = [0x37, 0x30, 0xa3];
+  const t = n <= 1 ? 0 : i / (n - 1);
+  const c = from.map((f, k) => Math.round(f + (to[k] - f) * t));
+  return `rgb(${c[0]}, ${c[1]}, ${c[2]})`;
+}
+
 export function FunnelViz({ rows, meta }: { rows: QueryRow[]; meta: QueryMeta }) {
   const dims = meta.dims as DimKey[];
   const stageDim = dims[0];
-  if (!stageDim || !rows.length) return <div className="py-8 text-center text-xs text-zinc-600">无数据</div>;
+  if (!stageDim || !rows.length) return <div className="py-8 text-center text-xs text-muted">无数据</div>;
 
   const list = rows; // 保持引擎返回的漏斗顺序（ord）
   const top = list[0]?.value || 0;
@@ -24,18 +33,18 @@ export function FunnelViz({ rows, meta }: { rows: QueryRow[]; meta: QueryMeta })
         return (
           <div key={`${label}-${i}`} className="group">
             <div className="mb-0.5 flex items-center justify-between text-[11px]">
-              <span className="max-w-[70%] truncate text-zinc-300" title={label}>
+              <span className="max-w-[70%] truncate text-body" title={label}>
                 {label}
               </span>
-              <span className="tnum text-zinc-400">
+              <span className="tnum text-muted">
                 {fmtValue(r.value, meta.unit)}
-                {conv != null && <span className="ml-1.5 text-zinc-600">{(conv * 100).toFixed(1)}%</span>}
+                {conv != null && <span className="ml-1.5 font-medium text-success">{(conv * 100).toFixed(1)}%</span>}
               </span>
             </div>
-            <div className="h-5 w-full overflow-hidden rounded bg-ink-850">
+            <div className="h-5 w-full overflow-hidden rounded bg-subtle">
               <div
                 className="h-full rounded transition-[width]"
-                style={{ width: `${Math.max(2, pct)}%`, background: colorAt(i) }}
+                style={{ width: `${Math.max(2, pct)}%`, background: funnelShade(i, list.length) }}
               />
             </div>
           </div>

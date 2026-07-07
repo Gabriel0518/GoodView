@@ -46,9 +46,9 @@ export function VizPicker({
             title={ok ? VIZ_META[viz].label : reason}
             className={cn(
               "rounded-lg border px-2.5 py-1.5 text-xs transition",
-              selected && ok && "border-accent bg-accent/20 text-accent-soft",
-              !selected && ok && "border-ink-700 bg-ink-850 text-zinc-300 hover:border-ink-600 hover:text-zinc-100",
-              !ok && "cursor-not-allowed border-ink-800 bg-ink-900/40 text-zinc-700",
+              selected && ok && "border-accent bg-accent-soft text-accent",
+              !selected && ok && "border-border bg-surface text-body hover:bg-subtle",
+              !ok && "cursor-not-allowed border-border bg-subtle text-faint",
             )}
           >
             {VIZ_META[viz].label}

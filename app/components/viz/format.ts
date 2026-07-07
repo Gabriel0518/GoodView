@@ -1,4 +1,4 @@
-// 按度量单位格式化数值 + 序列配色（与深色主题一致）。
+// 按度量单位格式化数值 + 序列配色（浅色 SaaS 数据可视化调色板）。
 import { fmtInt, fmtMoney, fmtNum, fmtPct } from "../../lib/util";
 
 export function fmtValue(v: number, unit?: string): string {
@@ -15,18 +15,15 @@ export function fmtValue(v: number, unit?: string): string {
   }
 }
 
-// 序列配色（accent 起头，循环取用）
+// 序列配色（accent 起头；UI-设计需求.md §2.1 / §6 调色板）
 export const SERIES_COLORS = [
-  "#7c8cff",
-  "#5ad1c8",
-  "#f6c177",
-  "#f38ba8",
-  "#a6da95",
-  "#c9a0ff",
-  "#7bd3f7",
-  "#f7a072",
-  "#9aa6ff",
-  "#e0af68",
+  "#4F46E5", // accent indigo
+  "#0EA5E9", // sky
+  "#10B981", // emerald
+  "#F59E0B", // amber
+  "#EC4899", // pink
+  "#8B5CF6", // violet
+  "#64748B", // slate
 ];
 
 export const colorAt = (i: number) => SERIES_COLORS[i % SERIES_COLORS.length];

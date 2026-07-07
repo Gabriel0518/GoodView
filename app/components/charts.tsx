@@ -1,4 +1,4 @@
-// 零依赖 SVG 折线图（单坐标轴，可多序列）
+// 零依赖 SVG 折线图（浅色：网格极浅、坐标轴 faint、序列色由调用方传入）
 export function LineChart({
   labels,
   series,
@@ -32,8 +32,8 @@ export function LineChart({
     <svg viewBox={`0 0 ${w} ${h}`} className="w-full" preserveAspectRatio="none" style={{ height }}>
       {grid.map((g, i) => (
         <g key={i}>
-          <line x1={padL} x2={w - padR} y1={Y(g)} y2={Y(g)} stroke="#26262f" strokeWidth={1} />
-          <text x={padL - 8} y={Y(g) + 3} textAnchor="end" fontSize={10} fill="#71717a" className="tnum">
+          <line x1={padL} x2={w - padR} y1={Y(g)} y2={Y(g)} stroke="#F1F3F5" strokeWidth={1} />
+          <text x={padL - 8} y={Y(g) + 3} textAnchor="end" fontSize={10} fill="#9CA3AF" className="tnum">
             {valueFmt(g)}
           </text>
         </g>
@@ -50,7 +50,7 @@ export function LineChart({
         );
       })}
       {xTicks.map((i) => (
-        <text key={i} x={X(i)} y={h - 6} textAnchor={i === 0 ? "start" : i === n - 1 ? "end" : "middle"} fontSize={10} fill="#71717a">
+        <text key={i} x={X(i)} y={h - 6} textAnchor={i === 0 ? "start" : i === n - 1 ? "end" : "middle"} fontSize={10} fill="#9CA3AF">
           {labels[i]?.slice(5)}
         </text>
       ))}
@@ -59,7 +59,7 @@ export function LineChart({
 }
 
 // 极简迷你趋势线（无坐标轴）
-export function Sparkline({ values, color = "#7c8cff", height = 34 }: { values: number[]; color?: string; height?: number }) {
+export function Sparkline({ values, color = "#4F46E5", height = 34 }: { values: number[]; color?: string; height?: number }) {
   const w = 120;
   const h = height;
   const max = Math.max(1, ...values);
@@ -76,4 +76,3 @@ export function Sparkline({ values, color = "#7c8cff", height = 34 }: { values: 
     </svg>
   );
 }
-
