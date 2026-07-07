@@ -13,22 +13,42 @@ async function connect() {
   return client;
 }
 
-// 单连接上顺序执行多条查询（getSnapshot/getFunnel 用）
-export async function withClient<T>(fn: (c: Client) => Promise<T>): Promise<T> {
-  const client = await connect();
-  try {
-    return await fn(client);
-  } finally {
-    await client.end().catch(() => {});
+// Railway 公网 proxy 偶发掐连接（Connection terminated / ECONNRESET）→ 瞬时错误重试
+const TRANSIENT = /terminated|ECONNRESET|ETIMEDOUT|ECONNREFUSED|EPIPE|socket hang up/i;
+async function withRetry<T>(fn: () => Promise<T>, retries = 2): Promise<T> {
+  let lastErr: unknown;
+  for (let i = 0; i <= retries; i++) {
+    try {
+      return await fn();
+    } catch (e) {
+      lastErr = e;
+      if (i === retries || !TRANSIENT.test(String((e as Error)?.message || e))) throw e;
+      await new Promise((r) => setTimeout(r, 300 * (i + 1)));
+    }
   }
+  throw lastErr;
 }
 
-// 单条查询（getStatus 用）
+// 单连接上顺序执行多条查询（getSnapshot/getFunnel 用）
+export async function withClient<T>(fn: (c: Client) => Promise<T>): Promise<T> {
+  return withRetry(async () => {
+    const client = await connect();
+    try {
+      return await fn(client);
+    } finally {
+      await client.end().catch(() => {});
+    }
+  });
+}
+
+// 单条查询（getStatus / groups 等用）
 export async function q<T extends Record<string, unknown> = Record<string, unknown>>(text: string, params?: unknown[]) {
-  const client = await connect();
-  try {
-    return await client.query<T>(text, params as never);
-  } finally {
-    await client.end().catch(() => {});
-  }
+  return withRetry(async () => {
+    const client = await connect();
+    try {
+      return await client.query<T>(text, params as never);
+    } finally {
+      await client.end().catch(() => {});
+    }
+  });
 }

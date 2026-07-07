@@ -2,7 +2,7 @@
 -- 由 db/migrate.mjs 应用。所有 date 用裸 date（业务日标签），不用 timestamptz。
 -- 不存派生率(cpm/ctr/cpc/cost_per_ig_auth)——全部在 app/lib/db-queries.ts 的组装查询里算。
 
--- ========== campaign_daily：date × account × campaign 广告花费（来自 XMP）==========
+-- ========== campaign_daily：date × account × campaign × adset 广告花费（来自 XMP）==========
 CREATE TABLE IF NOT EXISTS campaign_daily (
   date          date          NOT NULL,
   account_id    text          NOT NULL,
@@ -10,11 +10,13 @@ CREATE TABLE IF NOT EXISTS campaign_daily (
   channel       text          NOT NULL,            -- XMP module: facebook / tiktok / google
   campaign_id   text          NOT NULL,
   campaign_name text          NOT NULL,
-  cost          numeric(18,4) NOT NULL DEFAULT 0,  -- 保 XMP 4 位小数，避免 22k 行求和浮点漂移
+  adset_id      text          NOT NULL DEFAULT '_', -- 广告组（Meta adset）；无则占位 '_'
+  adset_name    text          NOT NULL DEFAULT '_',
+  cost          numeric(18,4) NOT NULL DEFAULT 0,  -- 保 XMP 4 位小数，避免求和浮点漂移
   impression    bigint        NOT NULL DEFAULT 0,
   click         bigint        NOT NULL DEFAULT 0,
   updated_at    timestamptz   NOT NULL DEFAULT now(),
-  PRIMARY KEY (date, account_id, campaign_id)
+  PRIMARY KEY (date, account_id, campaign_id, adset_id)
 );
 CREATE INDEX IF NOT EXISTS campaign_daily_date_idx         ON campaign_daily (date);
 CREATE INDEX IF NOT EXISTS campaign_daily_date_channel_idx ON campaign_daily (date, channel);
