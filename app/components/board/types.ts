@@ -26,11 +26,16 @@ export type Card = {
 // 看板级筛选 = 所有卡片查询的「底」。用 QueryFilters（granularity 必填）。
 export type BoardFilters = QueryFilters;
 
+// v3 桌面画布坐标/尺寸（存 dashboards.canvas JSONB）
+export type CanvasPos = { x: number; y: number; w?: number; h?: number };
+
 export type Dashboard = {
   id: number;
   name: string;
   board_filters: BoardFilters | null;
+  canvas?: CanvasPos | null;
   is_template: boolean;
+  card_count?: number;
 };
 
 // GET /api/meta/stages

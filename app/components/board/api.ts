@@ -1,7 +1,7 @@
 "use client";
 
 // 看板/卡片/元数据 REST 封装。所有形状对齐 Lead 提供的契约。
-import type { Card, CardConfig, CardLayout, BoardFilters, Dashboard, StageMeta, BoardGroup } from "./types";
+import type { Card, CardConfig, CardLayout, BoardFilters, Dashboard, StageMeta, BoardGroup, CanvasPos } from "./types";
 
 export async function jfetch<T>(url: string, init?: RequestInit): Promise<T> {
   const res = await fetch(url, { cache: "no-store", ...init });
@@ -18,12 +18,12 @@ const jbody = (method: string, body: unknown): RequestInit => ({
 
 // ── 看板 ─────────────────────────────────────────────
 export const listDashboards = () => jfetch<Dashboard[]>("/api/dashboards");
-export const createDashboard = (name: string, board_filters?: BoardFilters) =>
-  jfetch<{ id: number }>("/api/dashboards", jbody("POST", { name, board_filters }));
-// 注：契约 PUT 列出 {name?,board_filters?}；is_template 为前向兼容附加项（存模板用），后端未支持则忽略。
+export const createDashboard = (name: string, board_filters?: BoardFilters, canvas?: CanvasPos) =>
+  jfetch<{ id: number }>("/api/dashboards", jbody("POST", { name, board_filters, canvas }));
+// 注：契约 PUT 列出 {name?,board_filters?,canvas?}；is_template 为前向兼容附加项（存模板用）。
 export const updateDashboard = (
   id: number,
-  patch: { name?: string; board_filters?: BoardFilters; is_template?: boolean },
+  patch: { name?: string; board_filters?: BoardFilters; canvas?: CanvasPos; is_template?: boolean },
 ) => jfetch<unknown>("/api/dashboards", jbody("PUT", { id, ...patch }));
 export const deleteDashboard = (id: number) =>
   jfetch<unknown>(`/api/dashboards?id=${encodeURIComponent(id)}`, { method: "DELETE" });

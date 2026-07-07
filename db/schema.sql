@@ -91,14 +91,18 @@ CREATE TABLE IF NOT EXISTS ad_groups (
 
 -- ========== dashboards / cards：多看板 + 卡片持久化（P2 自助搭建器）==========
 -- board_filters: { window/dateFrom/dateTo, granularity, groupId?/accounts?/campaigns?/adsets?, channels?, sources? }
+-- canvas: { x, y, w?, h? } —— v3 桌面画布上的坐标/尺寸（自由摆放）
 CREATE TABLE IF NOT EXISTS dashboards (
   id            bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   name          text        NOT NULL,
   board_filters jsonb       NOT NULL DEFAULT '{}',
+  canvas        jsonb       NOT NULL DEFAULT '{}',
   is_template   boolean     NOT NULL DEFAULT false,
   created_at    timestamptz NOT NULL DEFAULT now(),
   updated_at    timestamptz NOT NULL DEFAULT now()
 );
+-- 对已存在旧表补列（幂等）
+ALTER TABLE dashboards ADD COLUMN IF NOT EXISTS canvas jsonb NOT NULL DEFAULT '{}';
 -- config: { measure, params{stage?/cvrFrom?/cvrTo?}, dims[], viz, cardFilters? }
 -- layout: { x, y, w, h }（react-grid-layout 栅格）
 CREATE TABLE IF NOT EXISTS cards (

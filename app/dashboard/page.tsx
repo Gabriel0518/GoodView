@@ -1,8 +1,6 @@
-"use client";
+import { redirect } from "next/navigation";
 
-// v2 首页 = 看板列表（创建 / 复制 / 存为模板 / 打开）。
-import { BoardList } from "../components/board/BoardList";
-
-export default function DashboardHomePage() {
-  return <BoardList />;
+// v3：看板列表页并入桌面画布（首页）。旧链接重定向。
+export default function Page() {
+  redirect("/");
 }
