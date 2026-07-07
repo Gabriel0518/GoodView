@@ -63,3 +63,16 @@ CREATE TABLE IF NOT EXISTS pull_runs (
   note        text
 );
 CREATE INDEX IF NOT EXISTS pull_runs_started_idx ON pull_runs (started_at DESC);
+
+-- ========== ad_groups：广告账户/系列分组（修成本失真 + 数据源编组）==========
+-- members: [{ "type":"account"|"campaign", "id":"...", "name":"..." }]
+-- 解析：account 展开为其下全部 campaign_id；campaign 即自身；去重后 WHERE campaign_id IN (集合)
+CREATE TABLE IF NOT EXISTS ad_groups (
+  id           bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
+  name         text        NOT NULL,
+  members      jsonb       NOT NULL DEFAULT '[]',
+  is_app_group boolean     NOT NULL DEFAULT false,   -- 标记"某 App 的花费集合"（如 PWA）
+  created_at   timestamptz NOT NULL DEFAULT now(),
+  updated_at   timestamptz NOT NULL DEFAULT now()
+);
+
