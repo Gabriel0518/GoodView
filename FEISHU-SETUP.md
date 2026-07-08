@@ -71,18 +71,22 @@ npm run feishu:sync     # 从 Postgres 灌最近 FEISHU_SYNC_DAYS 天到飞书�
 | 漏斗阶段定义 | 47 阶段元数据（顺序/事件名/开关） | 全量替换·全部 |
 | 广告分组 | 账户/系列编组 | 全量替换·全部 |
 
-## 五、挂进 Railway Cron（自动化）
+## 五、Railway Cron（已部署）
 
-同步是**全量替换**（清空整表再灌近 N 天，约 1.3 万行 delete+insert），比 Postgres 拉取重，**不建议跟 5 分钟拉取同频**。推荐两个独立 Cron 服务：
+已在 Railway 项目 `thorough-acceptance` / `production` 建好一个 **`feishu-sync`** 服务，自动**拉取 + 同步**一条龙：
 
-| 服务 | Start Command | 频率 | 该服务的 FEISHU_* 环境变量 |
-|---|---|---|---|
-| 拉库 | `node pull-all.mjs` | `*/5 * * * *` | **不配** → 只写 Postgres |
-| 飞书同步 | `node sync-to-feishu.mjs` | `7 * * * *`（每小时）| 配全 `FEISHU_APP_ID/SECRET/APP_TOKEN/...` |
+| 项 | 值 |
+|---|---|
+| 源 | 同 GoodView 的 repo `Gabriel0518/GoodView`（分支 `main`）|
+| 构建命令 | `npm install`（不跑 next build，纯拉数脚本）|
+| 启动命令 | `node pull-all.mjs`（拉 XMP+BytePlus 写 Postgres → 自动接飞书同步）|
+| Cron | `23,53 * * * *`（**每 30 分钟**）|
+| 重启策略 | `NEVER`（cron 跑完即退出，不常驻）|
+| 变量 | `DATABASE_URL=${{Postgres.DATABASE_URL}}` + XMP/BYTEPLUS/FEISHU_* 全套 |
 
-这样拉库高频、飞书同步低频，互不影响。若图省事想一条龙：把 `FEISHU_*` 配到拉库服务上即可（`pull-all` 拉完会自动接一步同步，但会每 5 分钟全量刷一次飞书）。
+改代码后 `git push` 到 `main` → GoodView 和 feishu-sync 都会重新构建。改频率：改该服务的 `deploy.cronSchedule`。
 
-> 注：飞书表只留近 30 天；Postgres 保全量历史，看板长历史仍查 Postgres。
+> 说明：这是「拉取+同步」合一的服务。飞书同步是全量替换（约 1.3 万行删+灌），30 分钟一轮完全够。若想更省接口调用，可把 cron 调稀（如每小时 `23 * * * *`）。GoodView（看板 web）不做 cron，只提供页面。
 
 ---
 
