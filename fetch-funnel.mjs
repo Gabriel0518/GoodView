@@ -143,6 +143,25 @@ async function fetchGroup(group) {
   return out;
 }
 
+// 过滤路径（多条件跨属性 OR，如成材=wd25 OR CashoutStageFive；分组匹配单值做不到）。
+// 用官方过滤格式(buildEventFilter) + 始终排测试用户；source_split 时用 source 分组 + 全量补 unknown。
+async function fetchFilteredStage(def) {
+  const filters = def.filters; // [{property,values},...] → 同一 OR 组
+  const ind = def.indicator;
+  if (!def.source_split) {
+    const totalDaily = await fetchEventDaily({ eventName: def.name, lastDays: DAYS, indicator: ind, filters });
+    const dates = totalDaily.map((x) => x.date);
+    return { key: def.key, bySource: totalOnly(totalDaily.map((x) => x.count), dates.length), dates, status: "ok(filter,no-split)" };
+  }
+  const [grouped, totalDaily] = await Promise.all([
+    fetchEventDailyGrouped({ eventName: def.name, lastDays: DAYS, groupBy: "source", propertyType: "profile", groupLocation: "content", indicator: ind, filters }),
+    fetchEventDaily({ eventName: def.name, lastDays: DAYS, indicator: ind, filters }),
+  ]);
+  const bySource = pickSingle(grouped.series);
+  fillUnknown(bySource, totalDaily.map((x) => x.count), grouped.dates.length);
+  return { key: def.key, bySource, dates: grouped.dates, status: "ok(filter)" };
+}
+
 async function main() {
   const t0 = Date.now();
   const defs = await loadFunnelDefs();
@@ -151,15 +170,21 @@ async function main() {
     await end();
     process.exit(1);
   }
-  const groups = buildGroups(defs);
-  console.log(`拉取完整漏斗（最近 ${DAYS} 天，${defs.length} 启用阶段合并为 ${groups.length} 组请求，并发 ${CONCURRENCY}）\n`);
+  // 多条件过滤（跨属性 OR，如成材）走过滤路径；其余走分组路径。
+  const filterDefs = defs.filter((d) => (d.filters?.length || 0) >= 2);
+  const groupDefs = defs.filter((d) => (d.filters?.length || 0) < 2);
+  const groups = buildGroups(groupDefs);
+  console.log(`拉取完整漏斗（最近 ${DAYS} 天，${defs.length} 启用阶段：${groups.length} 分组请求 + ${filterDefs.length} 过滤阶段，并发 ${CONCURRENCY}）\n`);
 
-  const results = await pMap(groups, fetchGroup, CONCURRENCY);
+  const [groupResults, filterResults] = await Promise.all([
+    pMap(groups, fetchGroup, CONCURRENCY),
+    pMap(filterDefs, fetchFilteredStage, CONCURRENCY),
+  ]);
 
   // 合并所有组结果
   const byKey = {};
   let dates = [];
-  results.forEach((r, gi) => {
+  groupResults.forEach((r, gi) => {
     if (r && r.__error) {
       // 整组失败：把组内所有 stage 标失败
       for (const st of groups[gi].stages) byKey[st.key] = { status: `失败:${String(r.__error.message).replace(/\s+/g, " ").slice(0, 28)}` };
@@ -169,6 +194,11 @@ async function main() {
       byKey[k] = v;
       if (v.dates?.length) dates = v.dates;
     }
+  });
+  filterResults.forEach((r, i) => {
+    if (r && r.__error) { byKey[filterDefs[i].key] = { status: `失败:${String(r.__error.message).replace(/\s+/g, " ").slice(0, 28)}` }; return; }
+    byKey[r.key] = r;
+    if (r.dates?.length) dates = r.dates;
   });
 
   const stages = [];

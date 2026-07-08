@@ -49,6 +49,10 @@ export const FUNNEL = [
   { key: "apk_open",             label: "在APK打开应用",         name: "pwa_page_view", filters: [{ property: "is_apk", values: ["true"] }] },
   { key: "task_realperson",      label: "真人验证任务完成",      name: "pwa_task_complete", filters: [{ property: "task_id", values: ["118"] }] },
   { key: "withdraw_task2",       label: "完成任务2(提现)",       name: "pwa_withdraw_audit_apply", filters: [{ property: "withdraw_amount", values: ["4", "7", "5.5"] }] },
+  { key: "withdraw_task3",       label: "完成任务3(提现)",       name: "pwa_withdraw_audit_apply", filters: [{ property: "withdraw_amount", values: ["10", "20"] }] },
+  { key: "withdraw_task4",       label: "完成任务4(提现)",       name: "pwa_withdraw_audit_apply", filters: [{ property: "withdraw_amount", values: ["12"] }] },
+  // 成材 = 完成任务5：wd=25 OR will_cashout_stage=CashoutStageFive（跨属性 OR → 走过滤路径）
+  { key: "chengcai",             label: "完成任务5·成材",        name: "pwa_withdraw_audit_apply", filters: [{ property: "withdraw_amount", values: [25] }, { property: "will_cashout_stage", values: ["CashoutStageFive"] }] },
   { key: "ins_auth_show",        label: "Ins授权浮层曝光",       name: "pwa_social_media_login_show" },
   { key: "ins_auth_click",       label: "Ins授权浮层点击",       name: "pwa_ins_login_button_click" },
   { key: "task_ins_bind",        label: "绑定Ins任务完成(IG授权)", name: "pwa_task_complete", filters: [{ property: "task_id", values: ["110"] }] },

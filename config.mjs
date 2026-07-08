@@ -19,7 +19,8 @@ export const BYTEPLUS = {
   sk: env.BYTEPLUS_SK || "",
   appId: Number(env.BYTEPLUS_APP_ID || 653834),
   igAuthEvent: env.BYTEPLUS_IG_AUTH_EVENT || "pwa_ins_login_button_click",
-  timezone: env.BYTEPLUS_TIMEZONE || "Asia/Shanghai",
+  // 官方报表锚 US/Eastern（数据口径-BytePlus计算方法.md §3）；漏斗按天口径与官方对齐。
+  timezone: env.BYTEPLUS_TIMEZONE || "US/Eastern",
 };
 
 export const SETTINGS = {
