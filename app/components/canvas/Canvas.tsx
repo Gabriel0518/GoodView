@@ -53,7 +53,7 @@ export function Canvas({
         maxScale={2}
         limitToBounds={false}
         centerOnInit={false}
-        wheel={{ step: 0.08 }}
+        wheel={{ step: 0.056 }}
         doubleClick={{ disabled: true }}
         panning={{ excluded: ["nopan"] }}
       >
