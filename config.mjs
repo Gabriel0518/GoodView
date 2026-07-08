@@ -27,3 +27,16 @@ export const SETTINGS = {
   defaultLookbackDays: Number(env.PULL_DEFAULT_DAYS || 30), // 默认拉最近 N 个完整日（不含今天）
   currency: env.CURRENCY || "USD",
 };
+
+// 飞书多维表格同步（Postgres → Bitable 单向镜像，供飞书仪表盘搭建）。
+// 未配置 appToken 时，同步整体跳过（pull-all 不受影响）。
+export const FEISHU = {
+  host: env.FEISHU_HOST || "https://open.feishu.cn",
+  appId: env.FEISHU_APP_ID || "",           // 自建应用 App ID
+  appSecret: env.FEISHU_APP_SECRET || "",   // 自建应用 App Secret
+  appToken: env.FEISHU_APP_TOKEN || "",     // 目标多维表格（Base）的 app_token
+  // 同步窗口：只镜像最近 N 天到飞书（Postgres 保全量历史）。飞书单表有行数上限（本项目 2 万/表），窗口越小越稳。
+  syncDays: Number(env.FEISHU_SYNC_DAYS || 30),
+  // campaign_daily 粒度：campaign（按系列聚合，行数少，默认）| adset（含广告组明细，行数多）。
+  campaignGrain: (env.FEISHU_CAMPAIGN_GRAIN || "campaign").toLowerCase() === "adset" ? "adset" : "campaign",
+};

@@ -3,7 +3,7 @@
 // 用法：node pull-all.mjs [天数]
 import { spawn } from "node:child_process";
 import { query, end } from "./lib/db.mjs";
-import { SETTINGS } from "./config.mjs";
+import { SETTINGS, FEISHU } from "./config.mjs";
 
 function run(cmd, args) {
   return new Promise((resolve) => {
@@ -45,6 +45,13 @@ async function main() {
     "UPDATE pull_runs SET finished_at = now(), ok = $2, snapshot_ok = $3, funnel_ok = $4 WHERE id = $1",
     [runId, ok, snapCode === 0, funnelCode === 0],
   );
+
+  // 拉库完成后镜像到飞书多维表格（Postgres 为准）。仅在配置了飞书时执行；失败不影响主库/退出码。
+  if (FEISHU.appToken) {
+    console.log(`[${new Date().toISOString()}] pull #${runId} → 同步飞书多维表格…`);
+    const syncCode = await run("node", ["sync-to-feishu.mjs"]);
+    if (syncCode !== 0) console.warn(`  ⚠️ 飞书同步返回 ${syncCode}（不影响 Postgres）`);
+  }
 
   const dur = ((Date.now() - t0) / 1000).toFixed(1);
   console.log(`[${new Date().toISOString()}] pull #${runId} ${ok ? "完成 ✅" : "部分失败 ⚠️"} 耗时 ${dur}s（snapshot=${snapCode} funnel=${funnelCode}）`);
