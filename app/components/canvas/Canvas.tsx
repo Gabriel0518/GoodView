@@ -2,14 +2,15 @@
 
 // v3 桌面画布：react-zoom-pan-pinch 缩放/平移；看板卡片自由摆放（绝对定位）。
 // 空白处拖动=平移画布；滚轮=缩放；卡片(.nopan)自己处理拖动。
-import { useRef } from "react";
+import { useEffect, useRef } from "react";
 import { TransformWrapper, TransformComponent, useControls, type ReactZoomPanPinchRef } from "react-zoom-pan-pinch";
 import { Plus, Minus, Maximize } from "lucide-react";
 import type { Dashboard, CanvasPos } from "../board/types";
 import { DesktopCard, CARD_W, CARD_H } from "./DesktopCard";
 
-const CANVAS_W = 4000;
-const CANVAS_H = 3000;
+// 大画布：边界远在视口之外，正常使用感知不到边界（配合卡片自由拖动、不夹取坐标）。
+const CANVAS_W = 8000;
+const CANVAS_H = 6000;
 
 // 无坐标的看板给个错开的默认位（按序网格）
 export function defaultPos(i: number): CanvasPos {
@@ -34,14 +35,21 @@ export function Canvas({
   onOpen,
   onMove,
   onMenu,
+  resetSignal,
 }: {
   dashboards: Dashboard[];
   onOpen: (id: number) => void;
   onMove: (id: number, pos: CanvasPos) => void;
   onMenu: (id: number, anchor: { x: number; y: number }) => void;
+  resetSignal?: number;
 }) {
   const scaleRef = useRef<ReactZoomPanPinchRef>(null);
   const getScale = () => scaleRef.current?.state.scale ?? 1;
+
+  // 整理后把视图复位到原点，让左对齐的列可见
+  useEffect(() => {
+    if (resetSignal) scaleRef.current?.resetTransform(200);
+  }, [resetSignal]);
 
   return (
     <div className="relative h-full w-full overflow-hidden bg-canvas">

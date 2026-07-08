@@ -43,7 +43,8 @@ export function DesktopCard({
     // 点击/拖动判定用【屏幕像素】阈值（不受缩放影响，否则缩小后点击被误判为拖动）
     if (Math.abs(rawDx) > 4 || Math.abs(rawDy) > 4) dr.moved = true;
     const s = getScale() || 1;
-    setP({ x: Math.max(0, dr.ox + rawDx / s), y: Math.max(0, dr.oy + rawDy / s) });
+    // 不夹取坐标 → 自由拖动，不会被 0 边界卡住
+    setP({ x: dr.ox + rawDx / s, y: dr.oy + rawDy / s });
   };
   const onUp = (e: React.PointerEvent) => {
     const dr = drag.current;
@@ -51,8 +52,8 @@ export function DesktopCard({
     if (!dr) return;
     if (dr.moved) {
       const s = getScale() || 1;
-      const fx = Math.max(0, dr.ox + (e.clientX - dr.sx) / s);
-      const fy = Math.max(0, dr.oy + (e.clientY - dr.sy) / s);
+      const fx = dr.ox + (e.clientX - dr.sx) / s;
+      const fy = dr.oy + (e.clientY - dr.sy) / s;
       onMove(d.id, { x: fx, y: fy });
     } else {
       onOpen(d.id);

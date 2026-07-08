@@ -3,7 +3,7 @@
 // v3.3 浮动侧栏（Dock）：左上角悬浮竖条，可折叠。承载 新建看板 / 广告分组 / 事件配置 入口。
 // 避开右下角画布缩放控件。折叠态=只显示图标，展开态=图标+文字。
 import { useState } from "react";
-import { Plus, Layers, SlidersHorizontal, ChevronLeft, ChevronRight } from "lucide-react";
+import { Plus, Layers, SlidersHorizontal, LayoutList, ChevronLeft, ChevronRight } from "lucide-react";
 
 type DockItem = { key: string; label: string; icon: typeof Plus; onClick: () => void };
 
@@ -11,15 +11,18 @@ export function FloatingDock({
   onNewBoard,
   onOpenGroups,
   onOpenEvents,
+  onTidy,
 }: {
   onNewBoard: () => void;
   onOpenGroups: () => void;
   onOpenEvents: () => void;
+  onTidy: () => void;
 }) {
   const [expanded, setExpanded] = useState(false);
 
   const items: DockItem[] = [
     { key: "new", label: "新建看板", icon: Plus, onClick: onNewBoard },
+    { key: "tidy", label: "整理排列", icon: LayoutList, onClick: onTidy },
     { key: "groups", label: "广告分组", icon: Layers, onClick: onOpenGroups },
     { key: "events", label: "事件配置", icon: SlidersHorizontal, onClick: onOpenEvents },
   ];

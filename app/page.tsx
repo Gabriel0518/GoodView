@@ -8,6 +8,7 @@ import type { Dashboard, CanvasPos } from "./components/board/types";
 import { DEFAULT_BOARD_FILTERS } from "./components/board/types";
 import { listDashboards, createDashboard, copyDashboard, updateDashboard, deleteDashboard } from "./components/board/api";
 import { Canvas, defaultPos } from "./components/canvas/Canvas";
+import { CARD_H } from "./components/canvas/DesktopCard";
 import { FloatingDock } from "./components/canvas/FloatingDock";
 import { BoardModal } from "./components/board/BoardModal";
 import { GroupsModal } from "./components/admin/GroupsModal";
@@ -34,6 +35,7 @@ function CanvasHome() {
   const [dashboards, setDashboards] = useState<Dashboard[] | null>(null);
   const [err, setErr] = useState<string | null>(null);
   const [menu, setMenu] = useState<Menu>(null);
+  const [resetSignal, setResetSignal] = useState(0);
   const busy = useRef(false);
 
   const load = useCallback(async () => {
@@ -55,6 +57,17 @@ function CanvasHome() {
   const moveCard = (id: number, pos: CanvasPos) => {
     setDashboards((ds) => ds?.map((d) => (d.id === id ? { ...d, canvas: pos } : d)) ?? null);
     updateDashboard(id, { canvas: pos }).catch((e) => setErr(String((e as Error)?.message || e)));
+  };
+
+  // 整理：所有看板按左边界对齐、上下等间隔排成一列；持久化 + 复位视图
+  const tidy = () => {
+    if (!dashboards?.length) return;
+    const MARGIN = 48;
+    const GAP = 24;
+    const next = dashboards.map((d, i) => ({ ...d, canvas: { x: MARGIN, y: MARGIN + i * (CARD_H + GAP) } }));
+    setDashboards(next);
+    next.forEach((d) => updateDashboard(d.id, { canvas: d.canvas }).catch((e) => setErr(String((e as Error)?.message || e))));
+    setResetSignal((s) => s + 1);
   };
 
   const newBoard = async () => {
@@ -95,12 +108,13 @@ function CanvasHome() {
           </div>
         </div>
       ) : (
-        <Canvas dashboards={dashboards} onOpen={openBoard} onMove={moveCard} onMenu={(id, a) => setMenu({ id, x: a.x, y: a.y })} />
+        <Canvas dashboards={dashboards} onOpen={openBoard} onMove={moveCard} onMenu={(id, a) => setMenu({ id, x: a.x, y: a.y })} resetSignal={resetSignal} />
       )}
 
-      {/* 浮动侧栏（V3.3）：新建看板 / 广告分组 / 事件配置 */}
+      {/* 浮动侧栏（V3.3）：新建看板 / 整理 / 广告分组 / 事件配置 */}
       <FloatingDock
         onNewBoard={newBoard}
+        onTidy={tidy}
         onOpenGroups={() => router.push("/?modal=groups")}
         onOpenEvents={() => router.push("/?modal=events")}
       />
