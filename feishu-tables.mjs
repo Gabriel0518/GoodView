@@ -268,14 +268,15 @@ const aiguildTable = {
   },
 };
 
-// ---- AI公会汇总（1 行：整个同步窗口的加权汇总，供指标卡取精确加权单价 = SUM花费/SUM人数）----
-// 指标卡的 rollup 无法算 SUM/SUM 比值，故在此 SQL 里算好，卡片对本表取 MAX(1 行) 即得精确值。
+// ---- AI公会汇总（3 行：近7日/近14日/近30日 各自的加权汇总，供指标卡取精确加权单价 = SUM花费/SUM人数）----
+// 指标卡的 rollup 无法算 SUM/SUM 比值，故在此 SQL 里按周期算好；卡片按「口径」过滤到某周期后取 MAX(1 行) 即得精确值。
 const aiguildSummaryTable = {
   key: "aiguild_summary",
   name: "AI公会汇总",
   windowed: true,
   fields: [
     { field_name: "口径", type: FT.TEXT },
+    { field_name: "排序", type: FT.NUMBER },
     { field_name: "花费", type: FT.NUMBER },
     { field_name: "注册人数", type: FT.NUMBER },
     { field_name: "注册单价", type: FT.NUMBER },
@@ -286,29 +287,30 @@ const aiguildSummaryTable = {
     { field_name: "成材人数", type: FT.NUMBER },
     { field_name: "成材单价", type: FT.NUMBER },
   ],
-  sql: (from, to) => ({
-    text: `
-      WITH spend AS (SELECT SUM(cost)::float8 cost FROM campaign_daily
-                     WHERE campaign_id = ANY($3) AND date BETWEEN $1 AND $2),
-      ppl AS (
-        SELECT
-          SUM(count) FILTER (WHERE stage_key=$4) reg,
-          SUM(count) FILTER (WHERE stage_key=$5) wd,
-          SUM(count) FILTER (WHERE stage_key=$6) ig,
-          SUM(count) FILTER (WHERE stage_key=$7) cc
-        FROM funnel_daily
-        WHERE date BETWEEN $1 AND $2 AND stage_key IN ($4,$5,$6,$7)
+  sql: (from, to) => {
+    // 每指标一个相关子查询，按 pr.days 滚动窗口（锚定 to=昨天）；人数口径随 2026-07-03 切换。
+    const ppl = (stage) =>
+      `(SELECT COALESCE(SUM(count),0) FROM funnel_daily
+        WHERE date > $2::date - pr.days AND date <= $2::date AND stage_key='${stage}'
           AND ((date <  DATE '${AIGUILD_SPLIT_DATE}' AND source = 'AIguild')
-            OR (date >= DATE '${AIGUILD_SPLIT_DATE}' AND source IN ('AIguild_active','AIguild_passive'))))
-      SELECT COALESCE(s.cost,0) cost, COALESCE(p.reg,0) reg, COALESCE(p.wd,0) wd,
-             COALESCE(p.ig,0) ig, COALESCE(p.cc,0) cc
-      FROM spend s CROSS JOIN ppl p`,
-    params: [from, to, AIGUILD_CAMPAIGNS,
-             AIGUILD_STAGES.reg, AIGUILD_STAGES.wd, AIGUILD_STAGES.ig, AIGUILD_STAGES.cc],
-  }),
+            OR (date >= DATE '${AIGUILD_SPLIT_DATE}' AND source IN ('AIguild_active','AIguild_passive'))))`;
+    return {
+      text: `
+        SELECT pr.label AS caliber, pr.days AS ord,
+          (SELECT COALESCE(SUM(cost),0)::float8 FROM campaign_daily
+           WHERE campaign_id = ANY($1) AND date > $2::date - pr.days AND date <= $2::date) AS cost,
+          ${ppl(AIGUILD_STAGES.reg)} AS reg,
+          ${ppl(AIGUILD_STAGES.wd)}  AS wd,
+          ${ppl(AIGUILD_STAGES.ig)}  AS ig,
+          ${ppl(AIGUILD_STAGES.cc)}  AS cc
+        FROM (VALUES (7::int,'近7日'),(14,'近14日'),(30,'近30日')) pr(days,label)
+        ORDER BY pr.days`,
+      params: [AIGUILD_CAMPAIGNS, to],
+    };
+  },
   toFields: (r) => {
     const cost = num(r.cost), reg = num(r.reg), wd = num(r.wd), ig = num(r.ig), cc = num(r.cc);
-    const f = { 口径: `近${FEISHU.syncDays}天`, 花费: cost, 注册人数: reg, 首提人数: wd, IG授权人数: ig, 成材人数: cc };
+    const f = { 口径: r.caliber, 排序: num(r.ord), 花费: cost, 注册人数: reg, 首提人数: wd, IG授权人数: ig, 成材人数: cc };
     const rp = price(cost, reg), wp = price(cost, wd), ip = price(cost, ig), cp = price(cost, cc);
     if (rp !== undefined) f.注册单价 = rp;
     if (wp !== undefined) f.首提单价 = wp;
