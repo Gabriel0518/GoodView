@@ -303,7 +303,7 @@ const aiguildSummaryTable = {
           ${ppl(AIGUILD_STAGES.wd)}  AS wd,
           ${ppl(AIGUILD_STAGES.ig)}  AS ig,
           ${ppl(AIGUILD_STAGES.cc)}  AS cc
-        FROM (VALUES (7::int,'近7日'),(14,'近14日'),(30,'近30日')) pr(days,label)
+        FROM (VALUES (1::int,'近1日'),(7,'近7日'),(14,'近14日'),(30,'近30日')) pr(days,label)
         ORDER BY pr.days`,
       params: [AIGUILD_CAMPAIGNS, to],
     };
