@@ -320,6 +320,145 @@ const aiguildSummaryTable = {
   },
 };
 
+// ===== PWA 非公会渠道（花费=2 个 facebook 账户全部系列；人数=非公会来源 fb/tt/bff/unknown，即排除 AIguild 三桶，无日期切换）=====
+const PWA_ACCOUNTS = ["864750783313841", "2236726820405499"]; // 省广_pwa_3_ymt_新, 省广_pwa_新_1_zmf
+const PWA_PPL_SOURCE = `source NOT IN ('AIguild','AIguild_active','AIguild_passive')`;
+
+// 单账户系列日报表：date × 系列 花费/曝光/点击（过滤全 0 行）
+const pwaAccountTable = (name, accId) => ({
+  key: `acct_${accId}`,
+  name,
+  windowed: true,
+  fields: [
+    { field_name: "标识", type: FT.TEXT },
+    { field_name: "日期", type: FT.DATE },
+    { field_name: "date_num", type: FT.NUMBER },
+    { field_name: "系列ID", type: FT.TEXT },
+    { field_name: "系列名", type: FT.TEXT },
+    { field_name: "花费", type: FT.NUMBER },
+    { field_name: "曝光", type: FT.NUMBER },
+    { field_name: "点击", type: FT.NUMBER },
+  ],
+  sql: (from, to) => ({
+    text: `SELECT to_char(date,'YYYY-MM-DD') AS date, campaign_id, MAX(campaign_name) AS campaign_name,
+                   SUM(cost)::float8 AS cost, SUM(impression)::bigint AS impression, SUM(click)::bigint AS click
+            FROM campaign_daily WHERE account_id = $1 AND date BETWEEN $2 AND $3
+              AND (cost > 0 OR impression > 0 OR click > 0)
+            GROUP BY date, campaign_id ORDER BY date DESC`,
+    params: [accId, from, to],
+  }),
+  toFields: (r) => ({
+    标识: `${r.date}|${r.campaign_id}`,
+    日期: dateMs(r.date), date_num: dateNum(r.date),
+    系列ID: r.campaign_id, 系列名: r.campaign_name || "",
+    花费: num(r.cost), 曝光: num(r.impression), 点击: num(r.click),
+  }),
+});
+const pwaAcct1 = pwaAccountTable("省广_pwa_3_ymt_新", "864750783313841");
+const pwaAcct2 = pwaAccountTable("省广_pwa_新_1_zmf", "2236726820405499");
+
+// PWA渠道日报（结构同 AI公会日报：花费=2 账户 ÷ 非公会来源人数，按日）
+const pwaDailyTable = {
+  key: "pwa_daily",
+  name: "PWA渠道日报",
+  windowed: true,
+  fields: [
+    { field_name: "标识", type: FT.TEXT },
+    { field_name: "日期", type: FT.DATE },
+    { field_name: "date_num", type: FT.NUMBER },
+    { field_name: "花费", type: FT.NUMBER },
+    { field_name: "注册人数", type: FT.NUMBER },
+    { field_name: "注册单价", type: FT.NUMBER },
+    { field_name: "首提人数", type: FT.NUMBER },
+    { field_name: "首提单价", type: FT.NUMBER },
+    { field_name: "IG授权人数", type: FT.NUMBER },
+    { field_name: "IG授权单价", type: FT.NUMBER },
+    { field_name: "成材人数", type: FT.NUMBER },
+    { field_name: "成材单价", type: FT.NUMBER },
+  ],
+  sql: (from, to) => ({
+    text: `
+      WITH d AS (SELECT generate_series($1::date,$2::date,'1 day')::date date),
+      spend AS (SELECT date, SUM(cost)::float8 cost FROM campaign_daily
+                WHERE account_id = ANY($3) AND date BETWEEN $1 AND $2 GROUP BY date),
+      ppl AS (
+        SELECT date,
+          SUM(count) FILTER (WHERE stage_key=$4) reg,
+          SUM(count) FILTER (WHERE stage_key=$5) wd,
+          SUM(count) FILTER (WHERE stage_key=$6) ig,
+          SUM(count) FILTER (WHERE stage_key=$7) cc
+        FROM funnel_daily
+        WHERE date BETWEEN $1 AND $2 AND stage_key IN ($4,$5,$6,$7) AND ${PWA_PPL_SOURCE}
+        GROUP BY date)
+      SELECT to_char(d.date,'YYYY-MM-DD') date, COALESCE(s.cost,0) cost,
+             COALESCE(p.reg,0) reg, COALESCE(p.wd,0) wd, COALESCE(p.ig,0) ig, COALESCE(p.cc,0) cc
+      FROM d LEFT JOIN spend s ON s.date=d.date LEFT JOIN ppl p ON p.date=d.date
+      WHERE COALESCE(s.cost,0)>0 OR COALESCE(p.reg,0)>0 OR COALESCE(p.wd,0)>0
+         OR COALESCE(p.ig,0)>0 OR COALESCE(p.cc,0)>0
+      ORDER BY d.date DESC`,
+    params: [from, to, PWA_ACCOUNTS, AIGUILD_STAGES.reg, AIGUILD_STAGES.wd, AIGUILD_STAGES.ig, AIGUILD_STAGES.cc],
+  }),
+  toFields: (r) => {
+    const cost = num(r.cost), reg = num(r.reg), wd = num(r.wd), ig = num(r.ig), cc = num(r.cc);
+    const f = { 标识: r.date, 日期: dateMs(r.date), date_num: dateNum(r.date),
+      花费: cost, 注册人数: reg, 首提人数: wd, IG授权人数: ig, 成材人数: cc };
+    const rp = price(cost, reg), wp = price(cost, wd), ip = price(cost, ig), cp = price(cost, cc);
+    if (rp !== undefined) f.注册单价 = rp;
+    if (wp !== undefined) f.首提单价 = wp;
+    if (ip !== undefined) f.IG授权单价 = ip;
+    if (cp !== undefined) f.成材单价 = cp;
+    return f;
+  },
+};
+
+// PWA渠道汇总（4 行：近1/7/14/30 日加权汇总，结构同 AI公会汇总）
+const pwaSummaryTable = {
+  key: "pwa_summary",
+  name: "PWA渠道汇总",
+  windowed: true,
+  fields: [
+    { field_name: "口径", type: FT.TEXT },
+    { field_name: "排序", type: FT.NUMBER },
+    { field_name: "花费", type: FT.NUMBER },
+    { field_name: "注册人数", type: FT.NUMBER },
+    { field_name: "注册单价", type: FT.NUMBER },
+    { field_name: "首提人数", type: FT.NUMBER },
+    { field_name: "首提单价", type: FT.NUMBER },
+    { field_name: "IG授权人数", type: FT.NUMBER },
+    { field_name: "IG授权单价", type: FT.NUMBER },
+    { field_name: "成材人数", type: FT.NUMBER },
+    { field_name: "成材单价", type: FT.NUMBER },
+  ],
+  sql: (from, to) => {
+    const ppl = (stage) =>
+      `(SELECT COALESCE(SUM(count),0) FROM funnel_daily
+        WHERE date > $2::date - pr.days AND date <= $2::date AND stage_key='${stage}' AND ${PWA_PPL_SOURCE})`;
+    return {
+      text: `
+        SELECT pr.label AS caliber, pr.days AS ord,
+          (SELECT COALESCE(SUM(cost),0)::float8 FROM campaign_daily
+           WHERE account_id = ANY($1) AND date > $2::date - pr.days AND date <= $2::date) AS cost,
+          ${ppl(AIGUILD_STAGES.reg)} AS reg,
+          ${ppl(AIGUILD_STAGES.wd)}  AS wd,
+          ${ppl(AIGUILD_STAGES.ig)}  AS ig,
+          ${ppl(AIGUILD_STAGES.cc)}  AS cc
+        FROM (VALUES (1::int,'近1日'),(7,'近7日'),(14,'近14日'),(30,'近30日')) pr(days,label)
+        ORDER BY pr.days`,
+      params: [PWA_ACCOUNTS, to],
+    };
+  },
+  toFields: (r) => {
+    const cost = num(r.cost), reg = num(r.reg), wd = num(r.wd), ig = num(r.ig), cc = num(r.cc);
+    const f = { 口径: r.caliber, 排序: num(r.ord), 花费: cost, 注册人数: reg, 首提人数: wd, IG授权人数: ig, 成材人数: cc };
+    const rp = price(cost, reg), wp = price(cost, wd), ip = price(cost, ig), cp = price(cost, cc);
+    if (rp !== undefined) f.注册单价 = rp;
+    if (wp !== undefined) f.首提单价 = wp;
+    if (ip !== undefined) f.IG授权单价 = ip;
+    if (cp !== undefined) f.成材单价 = cp;
+    return f;
+  },
+};
+
 export const TABLES = [
   campaignTable,
   funnelTable,
@@ -328,4 +467,8 @@ export const TABLES = [
   adGroupsTable,
   aiguildTable,
   aiguildSummaryTable,
+  pwaAcct1,
+  pwaAcct2,
+  pwaDailyTable,
+  pwaSummaryTable,
 ];
