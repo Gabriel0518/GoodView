@@ -459,6 +459,35 @@ const pwaSummaryTable = {
   },
 };
 
+// ===== 留存（快照，来自 BytePlus sitin 看板的留存报表，经 fetch-retention.mjs 落 retention_summary 表；非 Postgres 事实）=====
+const retentionTable = (key, name, category) => ({
+  key, name, windowed: false,
+  fields: [
+    { field_name: "报表", type: FT.TEXT },
+    { field_name: "排序", type: FT.NUMBER },
+    { field_name: "当日人数", type: FT.NUMBER },
+    { field_name: "次日留存率", type: FT.NUMBER },
+    { field_name: "3日留存率", type: FT.NUMBER },
+    { field_name: "7日留存率", type: FT.NUMBER },
+    { field_name: "14日留存率", type: FT.NUMBER },
+    { field_name: "30日留存率", type: FT.NUMBER },
+  ],
+  sql: () => ({
+    text: `SELECT report_name, ord, base_users, r_d1, r_d3, r_d7, r_d14, r_d30
+            FROM retention_summary WHERE category = $1 ORDER BY ord`,
+    params: [category],
+  }),
+  toFields: (r) => {
+    const f = { 报表: r.report_name, 排序: num(r.ord), 当日人数: num(r.base_users) };
+    const add = (k, v) => { if (v !== null && v !== undefined) f[k] = Number(v); };
+    add("次日留存率", r.r_d1); add("3日留存率", r.r_d3); add("7日留存率", r.r_d7);
+    add("14日留存率", r.r_d14); add("30日留存率", r.r_d30);
+    return f;
+  },
+});
+const retentionUser = retentionTable("retention_user", "用户留存", "user");
+const retentionChengcai = retentionTable("retention_chengcai", "成材女留存", "chengcai");
+
 export const TABLES = [
   campaignTable,
   funnelTable,
@@ -471,4 +500,6 @@ export const TABLES = [
   pwaAcct2,
   pwaDailyTable,
   pwaSummaryTable,
+  retentionUser,
+  retentionChengcai,
 ];

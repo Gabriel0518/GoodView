@@ -40,6 +40,10 @@ async function main() {
     run("node", ["fetch-funnel.mjs", ...daysArg]),
   ]);
 
+  // 留存快照（BytePlus sitin 看板报表）——独立、失败不影响主库；写 retention_summary。
+  const retCode = await run("node", ["fetch-retention.mjs"]);
+  if (retCode !== 0) console.warn(`  ⚠️ 留存拉取返回 ${retCode}（不影响主流程）`);
+
   const ok = snapCode === 0 && funnelCode === 0;
   await query(
     "UPDATE pull_runs SET finished_at = now(), ok = $2, snapshot_ok = $3, funnel_ok = $4 WHERE id = $1",
