@@ -2,7 +2,7 @@
 // 依赖 FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_APP_TOKEN（见 FEISHU-SETUP.md）。
 // 用法：node feishu-init-tables.mjs
 import { listTables, createTable } from "./lib/feishu.mjs";
-import { TABLES } from "./feishu-tables.mjs";
+import { buildTables, CONFIG_TABLES } from "./feishu-tables.mjs";
 import { FEISHU } from "./config.mjs";
 
 async function main() {
@@ -13,7 +13,9 @@ async function main() {
   console.log(`[飞书建表] Base=${FEISHU.appToken} · campaign 粒度=${FEISHU.campaignGrain}`);
   const existing = new Set((await listTables()).map((t) => t.name));
 
-  for (const t of TABLES) {
+  // 镜像表 + 配置表A（配置表A 只建表、不参与 Postgres→飞书 推送）
+  const all = [...(await buildTables()), ...CONFIG_TABLES];
+  for (const t of all) {
     if (existing.has(t.name)) {
       console.log(`  ⏭  已存在，跳过：${t.name}`);
       continue;

@@ -7,7 +7,7 @@
 // 用法：node sync-to-feishu.mjs [天数]   （默认 FEISHU_SYNC_DAYS）
 import { query, end } from "./lib/db.mjs";
 import { tableIdMap, batchCreate, batchDelete, listAllRecordIds } from "./lib/feishu.mjs";
-import { TABLES } from "./feishu-tables.mjs";
+import { buildTables } from "./feishu-tables.mjs";
 import { FEISHU } from "./config.mjs";
 
 function windowDates(days) {
@@ -45,6 +45,7 @@ async function main() {
   const win = windowDates(days);
   console.log(`[飞书同步] 全量替换 · 窗口 ${win.from} ~ ${win.to}（${days} 天）· campaign 粒度=${FEISHU.campaignGrain}`);
 
+  const TABLES = await buildTables(); // 派生表账户/系列从 ad_groups 动态解析
   const ids = await tableIdMap();
   let failed = 0;
   for (const t of TABLES) {

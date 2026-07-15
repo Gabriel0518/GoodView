@@ -6,6 +6,7 @@
 //   windowed=false 配置类小表：全量替换（清空后重灌）。
 import { FT, dateMs, dateNum } from "./lib/feishu.mjs";
 import { FEISHU } from "./config.mjs";
+import { loadAdGroups, resolveGroupToCampaignIds } from "./lib/groups.mjs";
 
 // 单选字段种子选项（新值写入时飞书会自动补建，这里只给已知值配色）
 const seed = (names) => ({ options: names.map((name, i) => ({ name, color: i % 10 })) });
@@ -201,6 +202,28 @@ const adGroupsTable = {
 
 export const DATE_NUM_FIELD = "date_num";
 
+// ==================== XMP抓取配置（配置表 A，反向：飞书 → Postgres）====================
+// 单表两类行，用「类别」列区分：广告账户/广告系列（抓取范围·白名单）+ 指标（抓哪些字段）。
+// 用户在飞书填；sync-config-from-feishu.mjs 读它、校验、覆盖 xmp_fetch_config、回写状态。
+// 唯一「飞书为权威、DB 为镜像」的反向表 —— 故【不】进 TABLES（不被 sync-to-feishu 推送覆盖），
+// 只由 feishu-init-tables 建表、sync-config 反向消费。类别/落库层做成下拉；值为主字段(文本)靠校验+回写兜错。
+export const xmpConfigTable = {
+  key: "xmp_fetch_config",
+  name: "XMP抓取配置",
+  reverse: true,
+  F: { value: "值", category: "类别", name: "名称", layer: "落库层", enabled: "启用", status: "状态" },
+  fields: [
+    { field_name: "值", type: FT.TEXT }, // 主字段：账户ID/系列ID（或其名称）或 指标（曝光/impression）
+    { field_name: "类别", type: FT.SINGLE_SELECT, property: seed(["广告账户", "广告系列", "指标"]) },
+    { field_name: "名称", type: FT.TEXT }, // 可读备注（账户/系列名；指标可留空）
+    { field_name: "落库层", type: FT.SINGLE_SELECT, property: seed(["core", "ext"]) }, // 仅「指标」行用
+    { field_name: "启用", type: FT.CHECKBOX },
+    { field_name: "状态", type: FT.TEXT }, // 脚本回写：✅ / ❌ 原因
+  ],
+};
+
+export const CONFIG_TABLES = [xmpConfigTable];
+
 // ---- AI公会日报（派生：广告分组「PWA AI公会」花费 ÷ AI公会来源人数，按日 join）----
 // 花费 = 2 系列(0630_web_text 直发 + 0617_Customer Form_1 留咨)。
 // 人数口径随日期切换（用户确认）：2026-07-03 前 source='AIguild' 为总口径；此后拆为 active+passive。
@@ -210,7 +233,7 @@ const AIGUILD_SPLIT_DATE = "2026-07-03";
 const AIGUILD_STAGES = { reg: "cash_ready_show", wd: "withdraw_first", ig: "task_ins_bind", cc: "chengcai" };
 const price = (cost, n) => (n > 0 ? Math.round((cost / n) * 100) / 100 : undefined);
 
-const aiguildTable = {
+const aiguildTable = (campaigns) => ({
   key: "aiguild_daily",
   name: "AI公会日报",
   windowed: true,
@@ -250,7 +273,7 @@ const aiguildTable = {
       WHERE COALESCE(s.cost,0)>0 OR COALESCE(p.reg,0)>0 OR COALESCE(p.wd,0)>0
          OR COALESCE(p.ig,0)>0 OR COALESCE(p.cc,0)>0
       ORDER BY d.date DESC`,
-    params: [from, to, AIGUILD_CAMPAIGNS,
+    params: [from, to, campaigns,
              AIGUILD_STAGES.reg, AIGUILD_STAGES.wd, AIGUILD_STAGES.ig, AIGUILD_STAGES.cc],
   }),
   toFields: (r) => {
@@ -266,11 +289,11 @@ const aiguildTable = {
     if (cp !== undefined) f.成材单价 = cp;
     return f;
   },
-};
+});
 
 // ---- AI公会汇总（3 行：近7日/近14日/近30日 各自的加权汇总，供指标卡取精确加权单价 = SUM花费/SUM人数）----
 // 指标卡的 rollup 无法算 SUM/SUM 比值，故在此 SQL 里按周期算好；卡片按「口径」过滤到某周期后取 MAX(1 行) 即得精确值。
-const aiguildSummaryTable = {
+const aiguildSummaryTable = (campaigns) => ({
   key: "aiguild_summary",
   name: "AI公会汇总",
   windowed: true,
@@ -305,7 +328,7 @@ const aiguildSummaryTable = {
           ${ppl(AIGUILD_STAGES.cc)}  AS cc
         FROM (VALUES (1::int,'近1日'),(7,'近7日'),(14,'近14日'),(30,'近30日')) pr(days,label)
         ORDER BY pr.days`,
-      params: [AIGUILD_CAMPAIGNS, to],
+      params: [campaigns, to],
     };
   },
   toFields: (r) => {
@@ -318,10 +341,12 @@ const aiguildSummaryTable = {
     if (cp !== undefined) f.成材单价 = cp;
     return f;
   },
-};
+});
 
-// ===== PWA 非公会渠道（花费=2 个 facebook 账户全部系列；人数=非公会来源 fb/tt/bff/unknown，即排除 AIguild 三桶，无日期切换）=====
+// ===== PWA 非公会渠道（花费=若干 facebook 账户全部系列；人数=非公会来源 fb/tt/bff/unknown，即排除 AIguild 三桶，无日期切换）=====
+// 账户列表现从 ad_groups(is_app_group=true) 动态取（见 resolveDerivedGroups）；下方为兜底默认。
 const PWA_ACCOUNTS = ["864750783313841", "2236726820405499"]; // 省广_pwa_3_ymt_新, 省广_pwa_新_1_zmf
+const PWA_ACCOUNT_NAMES = ["省广_pwa_3_ymt_新", "省广_pwa_新_1_zmf"];
 const PWA_PPL_SOURCE = `source NOT IN ('AIguild','AIguild_active','AIguild_passive')`;
 
 // 单账户系列日报表：date × 系列 花费/曝光/点击（过滤全 0 行）
@@ -354,11 +379,9 @@ const pwaAccountTable = (name, accId) => ({
     花费: num(r.cost), 曝光: num(r.impression), 点击: num(r.click),
   }),
 });
-const pwaAcct1 = pwaAccountTable("省广_pwa_3_ymt_新", "864750783313841");
-const pwaAcct2 = pwaAccountTable("省广_pwa_新_1_zmf", "2236726820405499");
 
-// PWA渠道日报（结构同 AI公会日报：花费=2 账户 ÷ 非公会来源人数，按日）
-const pwaDailyTable = {
+// PWA渠道日报（结构同 AI公会日报：花费=账户集合 ÷ 非公会来源人数，按日）
+const pwaDailyTable = (accounts) => ({
   key: "pwa_daily",
   name: "PWA渠道日报",
   windowed: true,
@@ -396,7 +419,7 @@ const pwaDailyTable = {
       WHERE COALESCE(s.cost,0)>0 OR COALESCE(p.reg,0)>0 OR COALESCE(p.wd,0)>0
          OR COALESCE(p.ig,0)>0 OR COALESCE(p.cc,0)>0
       ORDER BY d.date DESC`,
-    params: [from, to, PWA_ACCOUNTS, AIGUILD_STAGES.reg, AIGUILD_STAGES.wd, AIGUILD_STAGES.ig, AIGUILD_STAGES.cc],
+    params: [from, to, accounts, AIGUILD_STAGES.reg, AIGUILD_STAGES.wd, AIGUILD_STAGES.ig, AIGUILD_STAGES.cc],
   }),
   toFields: (r) => {
     const cost = num(r.cost), reg = num(r.reg), wd = num(r.wd), ig = num(r.ig), cc = num(r.cc);
@@ -409,10 +432,10 @@ const pwaDailyTable = {
     if (cp !== undefined) f.成材单价 = cp;
     return f;
   },
-};
+});
 
 // PWA渠道汇总（4 行：近1/7/14/30 日加权汇总，结构同 AI公会汇总）
-const pwaSummaryTable = {
+const pwaSummaryTable = (accounts) => ({
   key: "pwa_summary",
   name: "PWA渠道汇总",
   windowed: true,
@@ -444,7 +467,7 @@ const pwaSummaryTable = {
           ${ppl(AIGUILD_STAGES.cc)}  AS cc
         FROM (VALUES (1::int,'近1日'),(7,'近7日'),(14,'近14日'),(30,'近30日')) pr(days,label)
         ORDER BY pr.days`,
-      params: [PWA_ACCOUNTS, to],
+      params: [accounts, to],
     };
   },
   toFields: (r) => {
@@ -457,7 +480,7 @@ const pwaSummaryTable = {
     if (cp !== undefined) f.成材单价 = cp;
     return f;
   },
-};
+});
 
 // ===== 留存（快照，来自 BytePlus sitin 看板的留存报表，经 fetch-retention.mjs 落 retention_summary 表；非 Postgres 事实）=====
 const retentionTable = (key, name, category) => ({
@@ -488,18 +511,52 @@ const retentionTable = (key, name, category) => ({
 const retentionUser = retentionTable("retention_user", "用户留存", "user");
 const retentionChengcai = retentionTable("retention_chengcai", "成材女留存", "chengcai");
 
-export const TABLES = [
-  campaignTable,
-  funnelTable,
-  igTable,
-  stageMetaTable,
-  adGroupsTable,
-  aiguildTable,
-  aiguildSummaryTable,
-  pwaAcct1,
-  pwaAcct2,
-  pwaDailyTable,
-  pwaSummaryTable,
-  retentionUser,
-  retentionChengcai,
-];
+// 从 ad_groups 解析派生看板的账户/系列集合。找不到对应分组时回退到写死的默认值，保证行为不变。
+//   AI公会 = 名称含「AI公会/AIguild/公会」的分组 → 展开为 campaign_id 集合（花费按系列过滤）。
+//   PWA    = is_app_group=true 的分组（或名称含 PWA）→ 取其 account 成员（花费按账户过滤）。
+// 注意：人数口径层（AIGUILD_SPLIT_DATE 日期切换、PWA_PPL_SOURCE 反向 source）不来自 ad_groups，保持写死。
+async function resolveDerivedGroups() {
+  let groups = [];
+  try { groups = await loadAdGroups(); } catch { groups = []; }
+  const byName = (kw) => groups.find((g) => g.name.includes(kw));
+
+  // AI公会系列集合
+  let aiguildCampaigns = AIGUILD_CAMPAIGNS;
+  const aiG = byName("AI公会") || byName("AIguild") || byName("公会");
+  if (aiG) {
+    try {
+      const ids = await resolveGroupToCampaignIds(aiG.members);
+      if (ids.length) aiguildCampaigns = ids;
+    } catch { /* 保留默认 */ }
+  }
+
+  // PWA 账户集合（[{id,name}]）
+  let pwaAccounts = PWA_ACCOUNTS.map((id, i) => ({ id, name: PWA_ACCOUNT_NAMES[i] || id }));
+  const pwaG = groups.find((g) => g.is_app_group) || byName("PWA");
+  if (pwaG) {
+    const accs = pwaG.members.filter((m) => m.type === "account");
+    if (accs.length) pwaAccounts = accs.map((m) => ({ id: m.id, name: m.name || m.id }));
+  }
+  return { aiguildCampaigns, pwaAccounts };
+}
+
+// 构建全部镜像表（含从 ad_groups 动态解析的派生看板）。异步：需先查库解析分组。
+// 静态表(campaign/funnel/ig/stageMeta/adGroups/retention)不依赖分组，直接列出。
+export async function buildTables() {
+  const g = await resolveDerivedGroups();
+  const pwaAccIds = g.pwaAccounts.map((a) => a.id);
+  return [
+    campaignTable,
+    funnelTable,
+    igTable,
+    stageMetaTable,
+    adGroupsTable,
+    aiguildTable(g.aiguildCampaigns),
+    aiguildSummaryTable(g.aiguildCampaigns),
+    ...g.pwaAccounts.map((a) => pwaAccountTable(a.name, a.id)),
+    pwaDailyTable(pwaAccIds),
+    pwaSummaryTable(pwaAccIds),
+    retentionUser,
+    retentionChengcai,
+  ];
+}

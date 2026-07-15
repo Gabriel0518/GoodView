@@ -35,6 +35,12 @@ async function main() {
   const runId = rows[0].id;
   console.log(`[${new Date().toISOString()}] pull #${runId} 并行拉取 snapshot + funnel（${days} 天）…`);
 
+  // 抓取前先把飞书「XMP抓取配置」同步进 DB（失败不阻断：fetch-snapshot 用 DB 上次配置兜底）。
+  if (FEISHU.appToken) {
+    const cfgCode = await run("node", ["sync-config-from-feishu.mjs"]);
+    if (cfgCode !== 0) console.warn(`  ⚠️ 配置同步返回 ${cfgCode}（用 DB 上次配置继续）`);
+  }
+
   const [snapCode, funnelCode] = await Promise.all([
     run("node", ["fetch-snapshot.mjs", ...daysArg]),
     run("node", ["fetch-funnel.mjs", ...daysArg]),

@@ -27,15 +27,16 @@ const XMP_MAX_DAYS = Number(process.env.XMP_MAX_DAYS || 90);
 // 按 PK (date, account_id, campaign_id, adset_id) 聚合求和 → 天然去重、且隐藏拆分被正确合并。
 // 已验证：adset 级聚合总额 == campaign 级总额（仅 XMP 自身分级舍入的微差）。
 const KEY_SEP = String.fromCharCode(31); // US 分隔符，绝不出现在日期/ID/名称中，避免键边界歧义
-function aggregateByPk(rows) {
+function aggregateByPk(rows, extMetrics = []) {
   const m = new Map();
   for (const r of rows) {
     const k = r.date + KEY_SEP + r.account_id + KEY_SEP + r.campaign_id + KEY_SEP + r.adset_id;
     const o = m.get(k);
     if (o) {
       o.cost += r.cost; o.impression += r.impression; o.click += r.click;
+      for (const e of extMetrics) o._ext[e] = (o._ext[e] || 0) + (r._ext?.[e] || 0);
     } else {
-      m.set(k, { ...r });
+      m.set(k, { ...r, _ext: { ...(r._ext || {}) } });
     }
   }
   return [...m.values()];
@@ -55,6 +56,36 @@ const CAMPAIGN_COLS = [
   { name: "click", type: "bigint" },
 ];
 
+// 扩展指标长表列（ext 指标落这里）
+const METRIC_COLS = [
+  { name: "date", type: "date" },
+  { name: "account_id", type: "text" },
+  { name: "campaign_id", type: "text" },
+  { name: "adset_id", type: "text" },
+  { name: "metric_key", type: "text" },
+  { name: "value", type: "numeric" },
+];
+
+// 结构性核心指标（campaign_daily 三大列，始终抓取作floor，防止误删配置把列洗空）。ext 指标由配置追加。
+const CORE_METRICS = ["cost", "impression", "click"];
+
+// 读 XMP 抓取配置（xmp_fetch_config）：ext 指标 + 抓取范围（账户/系列白名单）。
+// 表不存在/查不到 → 空配置（仅抓核心、抓全部账户，不空跑）。
+async function loadXmpConfig() {
+  try {
+    const { rows } = await query(
+      `SELECT category, value, store_layer FROM xmp_fetch_config WHERE enabled = true`,
+    );
+    const ext = [...new Set(rows.filter((r) => r.category === "metric" && r.store_layer === "ext").map((r) => r.value))];
+    const accounts = new Set(rows.filter((r) => r.category === "account").map((r) => r.value));
+    const campaigns = new Set(rows.filter((r) => r.category === "campaign").map((r) => r.value));
+    return { ext, accounts, campaigns, scopeActive: accounts.size > 0 || campaigns.size > 0 };
+  } catch (e) {
+    console.warn(`[snapshot] 读 xmp_fetch_config 失败，仅抓核心指标、抓全部账户：${e.message}`);
+    return { ext: [], accounts: new Set(), campaigns: new Set(), scopeActive: false };
+  }
+}
+
 async function main() {
   const days = Number(process.argv[2]) || SETTINGS.defaultLookbackDays;
   const today = new Date();
@@ -64,8 +95,16 @@ async function main() {
 
   console.log(`[snapshot] 拉取 ${startDate} ~ ${endDate}（${days} 天）...`);
 
-  const M = ["cost", "impression", "click"];
+  const { ext: extMetrics, accounts, campaigns, scopeActive } = await loadXmpConfig();
+  const M = [...new Set([...CORE_METRICS, ...extMetrics])]; // 核心三列 + 配置 ext 指标，一次报表拿全
   const dim = ["date", "account_name", "campaign_id", "campaign_name", "adset_id", "adset_name"];
+  if (extMetrics.length) console.log(`[snapshot] ext 指标（长表）：${extMetrics.join(", ")}`);
+  if (scopeActive) console.log(`[snapshot] 抓取范围=白名单：账户 ${accounts.size} 个 · 系列 ${campaigns.size} 个（账户∪系列）`);
+  // 白名单命中：行的账户或系列（id 或名称任一）在配置集合内。空范围 → 全通过（抓全部）。
+  const inScope = (r) =>
+    !scopeActive ||
+    accounts.has(r.account_id) || accounts.has(r.account_name) ||
+    campaigns.has(r.campaign_id) || campaigns.has(r.campaign_name);
 
   // XMP 单次最多 90 天：>90 天时分段拉取再合并。BytePlus IG 并行拉（无此限制）。
   const chunks = dateChunks(startDate, endDate, XMP_MAX_DAYS);
@@ -79,19 +118,26 @@ async function main() {
   const byDate = {};
   const transform = (part) =>
     part
-      .map((r) => ({
-        date: r.date,
-        account_id: r.account_id || r.account_name,
-        account_name: r.account_name || r.account_id,
-        channel: r.module,
-        campaign_id: r.campaign_id,
-        campaign_name: r.campaign_name || r.campaign_id,
-        adset_id: r.adset_id || "_",           // 无 adset 时占位（对齐 schema/主键）
-        adset_name: r.adset_name || r.adset_id || "_",
-        cost: Number(r.cost) || 0,
-        impression: Number(r.impression) || 0,
-        click: Number(r.click) || 0,
-      }))
+      .map((r) => {
+        const o = {
+          date: r.date,
+          account_id: r.account_id || r.account_name,
+          account_name: r.account_name || r.account_id,
+          channel: r.module,
+          campaign_id: r.campaign_id,
+          campaign_name: r.campaign_name || r.campaign_id,
+          adset_id: r.adset_id || "_",           // 无 adset 时占位（对齐 schema/主键）
+          adset_name: r.adset_name || r.adset_id || "_",
+          cost: Number(r.cost) || 0,
+          impression: Number(r.impression) || 0,
+          click: Number(r.click) || 0,
+        };
+        if (extMetrics.length) {
+          o._ext = {};
+          for (const e of extMetrics) o._ext[e] = Number(r[e]) || 0;
+        }
+        return o;
+      })
       .filter((r) => {
         if (!r.campaign_id || !r.date) { dropped++; return false; } // PK 依赖 campaign_id（正确性红线5）
         return true;
@@ -100,13 +146,32 @@ async function main() {
   for (const [cs, ce] of chunks) {
     if (chunks.length > 1) console.log(`[snapshot]   段 ${cs} ~ ${ce} …`);
     const part = await fetchReport({ startDate: cs, endDate: ce, dimension: dim, metrics: M });
-    const rows = aggregateByPk(transform(part)); // 折叠 XMP adset 重复行至 PK 粒度，防主键冲突
-    if (!rows.length) continue;
-    const coveredDates = [...new Set(rows.map((r) => r.date))];
-    // campaign_daily：按本段覆盖的日期删除 + 分批插入（同一事务，处理缩量再拉）
+    const partT = transform(part);                                  // 全部行（未过滤范围），含 _ext
+    const windowDates = [...new Set(partT.map((r) => r.date))];      // 本段完整窗口（含未列名账户）
+    const scoped = scopeActive ? partT.filter(inScope) : partT;      // 白名单过滤
+    const rows = aggregateByPk(scoped, extMetrics);                  // 折叠 XMP adset 重复行至 PK 粒度，防主键冲突
+    // 白名单命中为空（可能配置写错）→ 跳过本段，绝不删空已有数据（防误配洗库）。
+    if (!rows.length) { if (scopeActive && windowDates.length) console.warn(`[snapshot]   段 ${cs}~${ce} 白名单未命中任何行，跳过（不改动已有数据）`); continue; }
+    // 删除范围=完整窗口 → 白名单下未列名账户在本窗口内被清掉（用户选定的「只抓填的」语义）。
+    const coveredDates = scopeActive ? windowDates : [...new Set(rows.map((r) => r.date))];
+    // 扩展指标长表行（每行 × 每个 ext 指标一行）
+    const metricRows = extMetrics.length
+      ? rows.flatMap((r) => extMetrics.map((e) => ({
+          date: r.date, account_id: r.account_id, campaign_id: r.campaign_id,
+          adset_id: r.adset_id, metric_key: e, value: r._ext[e] || 0,
+        })))
+      : [];
+    // campaign_daily + campaign_metric_daily：按本段覆盖的日期删除 + 分批插入（同一事务，处理缩量再拉）
     await withTx(async (c) => {
       await c.query("DELETE FROM campaign_daily WHERE date = ANY($1::date[])", [coveredDates]);
       await bulkInsert(c, "campaign_daily", CAMPAIGN_COLS, rows);
+      if (extMetrics.length) {
+        await c.query(
+          "DELETE FROM campaign_metric_daily WHERE date = ANY($1::date[]) AND metric_key = ANY($2::text[])",
+          [coveredDates, extMetrics],
+        );
+        await bulkInsert(c, "campaign_metric_daily", METRIC_COLS, metricRows);
+      }
     });
     totalRows += rows.length;
     coveredDates.forEach((d) => allDates.add(d));

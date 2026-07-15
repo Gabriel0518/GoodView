@@ -103,6 +103,39 @@ CREATE TABLE IF NOT EXISTS dashboards (
 );
 -- 对已存在旧表补列（幂等）
 ALTER TABLE dashboards ADD COLUMN IF NOT EXISTS canvas jsonb NOT NULL DEFAULT '{}';
+-- ========== xmp_fetch_config：XMP 抓取配置（DB 为权威源，飞书「XMP抓取配置」表为可编辑镜像）==========
+-- 单表两类行，用 category 区分：
+--   category='account'|'campaign' → 抓取范围（白名单）：value 填账户/系列的 id 或名称。
+--        为空(无此类行) → 抓全部账户（现状，安全兜底）；有此类行 → 只抓匹配的（account∪campaign 并集）。
+--   category='metric' → 抓哪些字段：value=XMP field id；store_layer=core(campaign_daily 三大列)|ext(长表)。
+-- sync-config-from-feishu.mjs 每次运行：读飞书 → 校验 → 全量覆盖本表 → 回写状态。飞书不可达时保留上次配置。
+DROP TABLE IF EXISTS fetch_field_config;  -- 旧的「仅字段」配置表，升级为下面的统一表
+CREATE TABLE IF NOT EXISTS xmp_fetch_config (
+  category    text        NOT NULL,                -- 'account' | 'campaign' | 'metric'
+  value       text        NOT NULL,                -- 账户/系列 token 或 指标 field id
+  name        text,                                -- 可读备注
+  store_layer text,                                -- 'core' | 'ext'（仅 metric 用）
+  enabled     boolean     NOT NULL DEFAULT true,
+  status      text,                                -- 校验/运行状态（回写飞书）
+  updated_at  timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (category, value)
+);
+
+-- ========== campaign_metric_daily：扩展指标长表（EAV）==========
+-- 配置里标 ext 的指标落这里，永不改表结构；核心 cost/impression/click 仍在 campaign_daily 宽表。
+-- 主键含 metric_key → 同一广告行的每个扩展指标一行。写入幂等：按(覆盖日期 × 涉及 metric_key)删除+重灌。
+CREATE TABLE IF NOT EXISTS campaign_metric_daily (
+  date        date          NOT NULL,
+  account_id  text          NOT NULL,
+  campaign_id text          NOT NULL,
+  adset_id    text          NOT NULL DEFAULT '_',
+  metric_key  text          NOT NULL,
+  value       numeric(20,4) NOT NULL DEFAULT 0,
+  updated_at  timestamptz   NOT NULL DEFAULT now(),
+  PRIMARY KEY (date, account_id, campaign_id, adset_id, metric_key)
+);
+CREATE INDEX IF NOT EXISTS campaign_metric_daily_key_date_idx ON campaign_metric_daily (metric_key, date);
+
 -- config: { measure, params{stage?/cvrFrom?/cvrTo?}, dims[], viz, cardFilters? }
 -- layout: { x, y, w, h }（react-grid-layout 栅格）
 CREATE TABLE IF NOT EXISTS cards (
