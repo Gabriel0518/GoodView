@@ -215,7 +215,7 @@ export const xmpConfigTable = {
   F: { value: "值", category: "类别", name: "名称", layer: "落库层", enabled: "启用", status: "状态" },
   fields: [
     { field_name: "值", type: FT.TEXT }, // 主字段：账户ID/系列ID（或其名称）或 指标（曝光/impression）
-    { field_name: "类别", type: FT.SINGLE_SELECT, property: seed(["广告账户", "广告系列", "指标", "PWA看板账户"]) },
+    { field_name: "类别", type: FT.SINGLE_SELECT, property: seed(["广告账户", "广告系列", "指标"]) },
     { field_name: "名称", type: FT.TEXT }, // 可读备注（账户/系列名；指标可留空）
     { field_name: "落库层", type: FT.SINGLE_SELECT, property: seed(["core", "ext"]) }, // 仅「指标」行用
     { field_name: "启用", type: FT.CHECKBOX },
@@ -512,10 +512,11 @@ const retentionTable = (key, name, category) => ({
 const retentionUser = retentionTable("retention_user", "用户留存", "user");
 const retentionChengcai = retentionTable("retention_chengcai", "成材女留存", "chengcai");
 
-// 从 ad_groups / 配置表解析派生看板的账户/系列集合。找不到配置时回退到写死的默认值，保证行为不变。
+// 从 ad_groups / 抓取配置解析派生看板的账户/系列集合。找不到配置时回退到写死的默认值，保证行为不变。
 //   AI公会 = 名称含「AI公会/AIguild/公会」的分组 → 展开为 campaign_id 集合（花费按系列过滤）。
-//   PWA(非公会)看板账户 = xmp_fetch_config 里 category='pwa_board' 的行（飞书「XMP抓取配置」表 类别=PWA看板账户）
-//                        → 花费按账户过滤。与抓取范围(category='account')解耦：一个管进库、一个管看板汇总。
+//   PWA(非公会)看板账户 = 「XMP抓取配置」里 category='account' 的账户行，自动排除拥有公会系列的账户
+//                        （即 AI公会 campaign 所属账户，如 pwa-2026-02）→ 与公会口径不重复。花费按账户过滤。
+//   → 你只在抓取配置里维护「广告账户」列表，加/减账户即改看板，无需额外类别；公会账户自动不算进 PWA。
 // 注意：人数口径层（AIGUILD_SPLIT_DATE 日期切换、PWA_PPL_SOURCE 反向 source）不来自配置，保持写死。
 async function resolveDerivedGroups() {
   let groups = [];
@@ -532,29 +533,41 @@ async function resolveDerivedGroups() {
     } catch { /* 保留默认 */ }
   }
 
-  // PWA(非公会)看板账户集（[{id,name}]）：读配置表 pwa_board 行，回退写死默认。
-  // 配置里「值」可填账户 id 或名称 → 用 campaign_daily 双向解析出规范 {id, name}；未落库账户按填的值当 id 兜底。
+  // PWA(非公会)看板账户集（[{id,name}]）：抓取配置的 account 行 − 公会账户 − 无花费账户，回退写死默认。
   let pwaAccounts = PWA_ACCOUNTS.map((id, i) => ({ id, name: PWA_ACCOUNT_NAMES[i] || id }));
   try {
-    const { rows: cfg } = await query(
-      `SELECT value, name FROM xmp_fetch_config WHERE category = 'pwa_board' AND enabled = true`,
+    const { rows: accRows } = await query(
+      `SELECT value, name FROM xmp_fetch_config WHERE category = 'account' AND enabled = true`,
     );
-    if (cfg.length) {
-      const vals = cfg.map((r) => r.value);
+    if (accRows.length) {
+      // 公会账户 = 拥有任一 AI公会 campaign 的账户（自动排除，避免与公会看板重复计花费）
+      const { rows: gAcc } = await query(
+        `SELECT DISTINCT account_id FROM campaign_daily WHERE campaign_id = ANY($1::text[])`,
+        [aiguildCampaigns],
+      );
+      const guildAccIds = new Set(gAcc.map((r) => r.account_id));
+      // account 行的「值」可填 id 或名称 → 解析成规范 {id, name}，并带近 60 天花费（过滤空账户，免建空表）
+      const vals = accRows.map((r) => r.value);
       const { rows: acc } = await query(
-        `SELECT DISTINCT account_id, account_name FROM campaign_daily
-          WHERE account_id = ANY($1::text[]) OR account_name = ANY($1::text[])`,
+        `SELECT account_id, MAX(account_name) AS account_name,
+                COALESCE(SUM(cost) FILTER (WHERE date > CURRENT_DATE - 60), 0)::float8 AS recent_cost
+           FROM campaign_daily
+          WHERE account_id = ANY($1::text[]) OR account_name = ANY($1::text[])
+          GROUP BY account_id`,
         [vals],
       );
       const nameById = new Map(acc.map((a) => [a.account_id, a.account_name]));
       const idByName = new Map(acc.map((a) => [a.account_name, a.account_id]));
+      const spendById = new Set(acc.filter((a) => a.recent_cost > 0).map((a) => a.account_id));
       const seen = new Set();
       const resolved = [];
-      for (const r of cfg) {
+      for (const r of accRows) {
         let id, nm;
         if (nameById.has(r.value)) { id = r.value; nm = nameById.get(r.value); }
         else if (idByName.has(r.value)) { id = idByName.get(r.value); nm = r.value; }
-        else { id = r.value; nm = r.name || r.value; } // 未落库账户：按填的值当 id
+        else continue;                        // 填的值在库里查无此账户 → 跳过（无数据可展示）
+        if (guildAccIds.has(id)) continue;    // 排除公会账户（花费归公会看板）
+        if (!spendById.has(id)) continue;     // 排除近 60 天零花费账户（免建空的账户系列表）
         if (seen.has(id)) continue;
         seen.add(id);
         resolved.push({ id, name: r.name || nm || id });
