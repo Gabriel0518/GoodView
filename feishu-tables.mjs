@@ -7,6 +7,7 @@
 import { FT, dateMs, dateNum } from "./lib/feishu.mjs";
 import { FEISHU } from "./config.mjs";
 import { loadAdGroups, resolveGroupToCampaignIds } from "./lib/groups.mjs";
+import { query } from "./lib/db.mjs";
 
 // 单选字段种子选项（新值写入时飞书会自动补建，这里只给已知值配色）
 const seed = (names) => ({ options: names.map((name, i) => ({ name, color: i % 10 })) });
@@ -214,7 +215,7 @@ export const xmpConfigTable = {
   F: { value: "值", category: "类别", name: "名称", layer: "落库层", enabled: "启用", status: "状态" },
   fields: [
     { field_name: "值", type: FT.TEXT }, // 主字段：账户ID/系列ID（或其名称）或 指标（曝光/impression）
-    { field_name: "类别", type: FT.SINGLE_SELECT, property: seed(["广告账户", "广告系列", "指标"]) },
+    { field_name: "类别", type: FT.SINGLE_SELECT, property: seed(["广告账户", "广告系列", "指标", "PWA看板账户"]) },
     { field_name: "名称", type: FT.TEXT }, // 可读备注（账户/系列名；指标可留空）
     { field_name: "落库层", type: FT.SINGLE_SELECT, property: seed(["core", "ext"]) }, // 仅「指标」行用
     { field_name: "启用", type: FT.CHECKBOX },
@@ -511,10 +512,11 @@ const retentionTable = (key, name, category) => ({
 const retentionUser = retentionTable("retention_user", "用户留存", "user");
 const retentionChengcai = retentionTable("retention_chengcai", "成材女留存", "chengcai");
 
-// 从 ad_groups 解析派生看板的账户/系列集合。找不到对应分组时回退到写死的默认值，保证行为不变。
+// 从 ad_groups / 配置表解析派生看板的账户/系列集合。找不到配置时回退到写死的默认值，保证行为不变。
 //   AI公会 = 名称含「AI公会/AIguild/公会」的分组 → 展开为 campaign_id 集合（花费按系列过滤）。
-//   PWA    = is_app_group=true 的分组（或名称含 PWA）→ 取其 account 成员（花费按账户过滤）。
-// 注意：人数口径层（AIGUILD_SPLIT_DATE 日期切换、PWA_PPL_SOURCE 反向 source）不来自 ad_groups，保持写死。
+//   PWA(非公会)看板账户 = xmp_fetch_config 里 category='pwa_board' 的行（飞书「XMP抓取配置」表 类别=PWA看板账户）
+//                        → 花费按账户过滤。与抓取范围(category='account')解耦：一个管进库、一个管看板汇总。
+// 注意：人数口径层（AIGUILD_SPLIT_DATE 日期切换、PWA_PPL_SOURCE 反向 source）不来自配置，保持写死。
 async function resolveDerivedGroups() {
   let groups = [];
   try { groups = await loadAdGroups(); } catch { groups = []; }
@@ -530,13 +532,37 @@ async function resolveDerivedGroups() {
     } catch { /* 保留默认 */ }
   }
 
-  // PWA 账户集合（[{id,name}]）
+  // PWA(非公会)看板账户集（[{id,name}]）：读配置表 pwa_board 行，回退写死默认。
+  // 配置里「值」可填账户 id 或名称 → 用 campaign_daily 双向解析出规范 {id, name}；未落库账户按填的值当 id 兜底。
   let pwaAccounts = PWA_ACCOUNTS.map((id, i) => ({ id, name: PWA_ACCOUNT_NAMES[i] || id }));
-  const pwaG = groups.find((g) => g.is_app_group) || byName("PWA");
-  if (pwaG) {
-    const accs = pwaG.members.filter((m) => m.type === "account");
-    if (accs.length) pwaAccounts = accs.map((m) => ({ id: m.id, name: m.name || m.id }));
-  }
+  try {
+    const { rows: cfg } = await query(
+      `SELECT value, name FROM xmp_fetch_config WHERE category = 'pwa_board' AND enabled = true`,
+    );
+    if (cfg.length) {
+      const vals = cfg.map((r) => r.value);
+      const { rows: acc } = await query(
+        `SELECT DISTINCT account_id, account_name FROM campaign_daily
+          WHERE account_id = ANY($1::text[]) OR account_name = ANY($1::text[])`,
+        [vals],
+      );
+      const nameById = new Map(acc.map((a) => [a.account_id, a.account_name]));
+      const idByName = new Map(acc.map((a) => [a.account_name, a.account_id]));
+      const seen = new Set();
+      const resolved = [];
+      for (const r of cfg) {
+        let id, nm;
+        if (nameById.has(r.value)) { id = r.value; nm = nameById.get(r.value); }
+        else if (idByName.has(r.value)) { id = idByName.get(r.value); nm = r.value; }
+        else { id = r.value; nm = r.name || r.value; } // 未落库账户：按填的值当 id
+        if (seen.has(id)) continue;
+        seen.add(id);
+        resolved.push({ id, name: r.name || nm || id });
+      }
+      if (resolved.length) pwaAccounts = resolved;
+    }
+  } catch { /* 读配置失败 → 保留默认 */ }
+
   return { aiguildCampaigns, pwaAccounts };
 }
 

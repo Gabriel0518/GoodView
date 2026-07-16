@@ -42,7 +42,7 @@ async function main() {
   const valid = [];      // { category, value, name, store_layer, enabled }
   const writeback = [];  // { record_id, fields:{状态} }
   const seen = new Set();
-  const counts = { account: 0, campaign: 0, metric: 0 };
+  const counts = { account: 0, campaign: 0, metric: 0, pwa_board: 0 };
   for (const rec of records) {
     const f = rec.fields || {};
     const category = cellStr(f[F.category]).trim();
@@ -64,7 +64,10 @@ async function main() {
         seen.add(key);
         valid.push({ category: v.kind, value: v.value, name: name || null, store_layer: v.layer || null, enabled });
         if (enabled) counts[v.kind]++;
-        const tag = v.kind === "metric" ? `${v.label}(${v.layer})` : v.kind === "account" ? "账户" : "系列";
+        const tag = v.kind === "metric" ? `${v.label}(${v.layer})`
+          : v.kind === "account" ? "账户"
+          : v.kind === "campaign" ? "系列"
+          : "看板账户";
         status = enabled ? `✅ ${tag}` : `⏸ 已停用（${tag}）`;
       }
     }
@@ -94,7 +97,8 @@ async function main() {
     ? `范围=白名单（账户 ${counts.account} · 系列 ${counts.campaign}）`
     : `范围=全部账户（无账户/系列行）`;
   console.log(
-    `[配置同步] 飞书 ${records.length} 行 → 有效 ${valid.length} · 启用指标 ${counts.metric} · ${scope} · 回写状态 ${wrote} 行`,
+    `[配置同步] 飞书 ${records.length} 行 → 有效 ${valid.length} · 启用指标 ${counts.metric} · ${scope}` +
+    ` · PWA看板账户 ${counts.pwa_board} · 回写状态 ${wrote} 行`,
   );
 }
 
