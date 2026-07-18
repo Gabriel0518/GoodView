@@ -150,3 +150,35 @@ CREATE TABLE IF NOT EXISTS cards (
 );
 CREATE INDEX IF NOT EXISTS cards_dashboard_idx ON cards (dashboard_id);
 
+-- ========== adgroup_daily_report：PWA 广告组日报 + 优化建议（累积日志）==========
+-- 每天 9:00(UTC+8) 由 daily-adgroup-report.mjs 写入「前一天」每个在跑广告组的记录 + 规则化优化建议。
+-- 只覆盖当前可用的 PWA facebook 账户（3_ymt 被封后 = 新_1_zmf / 新_4-ymt）。
+-- 注册无法归因到广告组（BytePlus 只到 source 级），故广告组级只有花费/CTR/CPC；acct_cpa=两账户当日 fb 大盘单价（每行相同，仅上下文）。
+-- 建议基于「近3日」窗口（比单日稳），字段口径见 daily-adgroup-report.mjs 的 THRESH 常量。
+-- 幂等：按 date DELETE+INSERT。累积历史（PG 保全量；飞书镜像按需窗口）。
+CREATE TABLE IF NOT EXISTS adgroup_daily_report (
+  date          date          NOT NULL,
+  account_id    text          NOT NULL,
+  account_name  text          NOT NULL,
+  campaign_id   text          NOT NULL,
+  campaign_name text          NOT NULL,
+  adset_id      text          NOT NULL DEFAULT '_',
+  adset_name    text          NOT NULL DEFAULT '_',
+  cost          numeric(18,4) NOT NULL DEFAULT 0,   -- 昨日花费
+  impression    bigint        NOT NULL DEFAULT 0,
+  click         bigint        NOT NULL DEFAULT 0,
+  ctr           numeric(8,4)  NOT NULL DEFAULT 0,   -- 昨日 CTR %
+  cpc           numeric(10,4) NOT NULL DEFAULT 0,   -- 昨日 CPC $
+  cost3         numeric(18,4) NOT NULL DEFAULT 0,   -- 近3日花费
+  ctr3          numeric(8,4)  NOT NULL DEFAULT 0,   -- 近3日 CTR %（建议依据）
+  cpc3          numeric(10,4) NOT NULL DEFAULT 0,   -- 近3日 CPC $（建议依据）
+  is_new        boolean       NOT NULL DEFAULT false, -- 首见≤2天前=新（测试期）
+  action        text          NOT NULL,             -- 放量/维持/砍预算/暂停/测试观察
+  priority      int           NOT NULL DEFAULT 5,
+  reason        text          NOT NULL DEFAULT '',
+  acct_cpa      numeric(10,4),                       -- 两账户当日 fb 大盘单价（上下文，每行相同）
+  updated_at    timestamptz   NOT NULL DEFAULT now(),
+  PRIMARY KEY (date, account_id, campaign_id, adset_id)
+);
+CREATE INDEX IF NOT EXISTS adgroup_daily_report_date_idx ON adgroup_daily_report (date);
+

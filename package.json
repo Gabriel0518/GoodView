@@ -10,6 +10,7 @@
     "pull": "node pull-all.mjs",
     "pull:backfill": "node pull-all.mjs 365",
     "pull:seq": "node fetch-snapshot.mjs && node fetch-funnel.mjs",
+    "report:daily": "node daily-adgroup-report.mjs",
     "feishu:init": "node feishu-init-tables.mjs",
     "feishu:sync": "node sync-to-feishu.mjs",
     "daemon": "node daemon.mjs"
