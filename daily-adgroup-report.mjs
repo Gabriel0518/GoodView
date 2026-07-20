@@ -13,9 +13,9 @@ import {
 } from "./lib/feishu.mjs";
 import { FEISHU } from "./config.mjs";
 
-// —— 当前可用的 PWA facebook 账户（3_ymt 于 2026-07 被封，剩这两个）——
+// —— 当前可用的 PWA facebook 账户（3_ymt 和 新_1_zmf 先后于 2026-07 被封，仅剩 新_4-ymt 一个）——
+// 账户被封/新增只改这一处：删掉被封行 / 加回新行。被封账户移除后其广告组自然不再出现在日报。
 const ACCOUNTS = [
-  { id: "2236726820405499", name: "省广_pwa_新_1_zmf" },
   { id: "937843245746108",  name: "省广_pwa_新_4-ymt" },
 ];
 const ACCOUNT_IDS = ACCOUNTS.map((a) => a.id);
@@ -93,13 +93,17 @@ async function computeRows(target) {
     GROUP BY campaign_id, adset_id`, [ACCOUNT_IDS])).rows;
   const fsmap = Object.fromEntries(fs.map((r) => [r.campaign_id + "|" + r.adset_id, r.first_seen]));
 
-  // 当日大盘单价：两账户花费 ÷ fb 注册(cash_ready_show, source=fb)
+  // 当日大盘单价：账户花费 ÷ fb 注册(cash_ready_show, source=fb)。
+  // ⚠️ BytePlus 注册数据比 XMP 花费滞后约 1 天 → 用「最近有注册数据的日」(≤target) 算 CPA，
+  //    否则最新一天 fb 注册=0、CPA 恒为 N/A。CTR/CPC(决策依据)仍用 target 当天的新鲜花费。
+  const funnelMax = (await query(`SELECT MAX(date)::text a FROM funnel_daily`)).rows[0].a;
+  const cpaDate = funnelMax && funnelMax < target ? funnelMax : target;
   const acctCost = (await query(
     `SELECT COALESCE(SUM(cost),0)::float8 c FROM campaign_daily WHERE account_id = ANY($1) AND date = $2`,
-    [ACCOUNT_IDS, target])).rows[0].c;
+    [ACCOUNT_IDS, cpaDate])).rows[0].c;
   const fbReg = (await query(
     `SELECT COALESCE(SUM(count),0)::int n FROM funnel_daily
-     WHERE stage_key='cash_ready_show' AND source='fb' AND date = $1`, [target])).rows[0].n;
+     WHERE stage_key='cash_ready_show' AND source='fb' AND date = $1`, [cpaDate])).rows[0].n;
   const acctCpa = fbReg > 0 ? r2(acctCost / fbReg) : null;
 
   const rows = day.map((d) => {
@@ -126,7 +130,7 @@ async function computeRows(target) {
   });
   // 排序：优先级升序 → 花费降序（要处理的排前面）
   rows.sort((a, b) => a.priority - b.priority || b.cost - a.cost);
-  return { rows, acctCost: r2(acctCost), fbReg, acctCpa };
+  return { rows, acctCost: r2(acctCost), fbReg, acctCpa, cpaDate };
 }
 
 function subDays(ymd, n) {
@@ -211,9 +215,10 @@ async function main() {
   if (!argDate && maxDate && maxDate < target) {
     console.warn(`  ⚠️ 前一天(${target}) 还没入库，改用最新完整日 ${maxDate}`);
   }
-  const { rows, acctCost, fbReg, acctCpa } = await computeRows(target);
+  const { rows, acctCost, fbReg, acctCpa, cpaDate } = await computeRows(target);
   if (!rows.length) { console.warn("  ⚠️ 目标日无在跑广告组（可能数据未到），退出。"); return; }
-  console.log(`  两账户当日花费=$${acctCost} · fb注册=${fbReg} · 大盘CPA=${acctCpa == null ? "N/A" : "$" + acctCpa}`);
+  const cpaNote = cpaDate === target ? "" : `（注册滞后，CPA 按 ${cpaDate} 结算日计）`;
+  console.log(`  ${ACCOUNTS.map((a) => a.name).join("/")} 花费=$${acctCost} · fb注册=${fbReg} · 大盘CPA=${acctCpa == null ? "N/A" : "$" + acctCpa} ${cpaNote}`);
   await writePg(target, rows);
   console.log(`  ✅ Postgres adgroup_daily_report：写 ${rows.length} 行`);
   await writeFeishu(target, rows);
