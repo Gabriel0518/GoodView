@@ -50,6 +50,11 @@ async function main() {
   const retCode = await run("node", ["fetch-retention.mjs"]);
   if (retCode !== 0) console.warn(`  ⚠️ 留存拉取返回 ${retCode}（不影响主流程）`);
 
+  // 素材(ad)级抓取（仅活跃 PWA 账户，account_id 过滤，轻量）——写 ad_daily，供广告组日报算「可加量素材」。
+  // 在 snapshot 之后跑，避开 XMP QPM 争抢；失败不影响主库/退出码。
+  const adsCode = await run("node", ["fetch-ads.mjs"]);
+  if (adsCode !== 0) console.warn(`  ⚠️ 素材级拉取返回 ${adsCode}（不影响主流程）`);
+
   const ok = snapCode === 0 && funnelCode === 0;
   await query(
     "UPDATE pull_runs SET finished_at = now(), ok = $2, snapshot_ok = $3, funnel_ok = $4 WHERE id = $1",

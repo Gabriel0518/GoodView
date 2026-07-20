@@ -1,24 +1,20 @@
-// PWA 广告组日报 + 优化建议。每天 9:00(UTC+8) 跑一次：
-//   取「前一天」两个可用账户(新_1_zmf / 新_4-ymt)的每个在跑广告组 → 昨日花费/CTR/CPC + 近3日窗口
-//   → 规则化优化建议(放量/维持/砍预算/暂停/测试观察) → 写 Postgres adgroup_daily_report(累积)
-//   → 追加到飞书表「PWA广告组日报与优化」(按日期幂等：先删当日行再插，保留历史与人工批注)。
+// PWA 广告组日报 + 优化建议。每天 9:15(UTC+8) 跑一次：
+//   取「前一天」活跃 PWA 账户(lib/pwa-accounts)的每个在跑广告组 → 昨日花费/CTR/CPC + 近3日窗口
+//   → 规则化优化建议(放量/维持/砍预算/暂停/测试观察) + 每组「可加量素材」(据 ad_daily 素材级 CTR/CPC)
+//   → 写 Postgres adgroup_daily_report(累积) → 追加到飞书表「PWA广告组日报与优化」(按日期幂等：先删当日行再插)。
 //
-// 注册无法归因到广告组(BytePlus 只到 source 级)，故广告组级只看点击经济性(CTR/CPC)；
-// 当日大盘单价(两账户 fb-CPA)作为上下文列放每行。3_ymt 被封后账户集见 ACCOUNTS。
+// 注册无法归因到广告组/素材(BytePlus 只到 source 级)，故广告组与素材层都只看点击经济性(CTR/CPC)；
+// 当日大盘单价(活跃账户 fb-CPA)作为上下文列放每行。活跃账户集见 lib/pwa-accounts.mjs。
 // 用法：node daily-adgroup-report.mjs [YYYY-MM-DD]   不传=自动取「前一天(UTC+8)」，缺数则回退到库里最新完整日。
 import { query, withTx, bulkInsert, end } from "./lib/db.mjs";
 import {
   listTables, createTable, tableIdMap, batchCreate, batchDelete,
-  searchRecordIdsByDateNum, FT, dateMs, dateNum,
+  searchRecordIdsByDateNum, listFields, createField, FT, dateMs, dateNum,
 } from "./lib/feishu.mjs";
 import { FEISHU } from "./config.mjs";
+import { ACTIVE_PWA_ACCOUNTS as ACCOUNTS, ACTIVE_PWA_ACCOUNT_IDS as ACCOUNT_IDS } from "./lib/pwa-accounts.mjs";
 
-// —— 当前可用的 PWA facebook 账户（3_ymt 和 新_1_zmf 先后于 2026-07 被封，仅剩 新_4-ymt 一个）——
-// 账户被封/新增只改这一处：删掉被封行 / 加回新行。被封账户移除后其广告组自然不再出现在日报。
-const ACCOUNTS = [
-  { id: "937843245746108",  name: "省广_pwa_新_4-ymt" },
-];
-const ACCOUNT_IDS = ACCOUNTS.map((a) => a.id);
+// 活跃 PWA 账户唯一事实源在 lib/pwa-accounts.mjs（加/减账户改那一处，报表+素材抓取都跟着变）。
 const FEISHU_TABLE = "PWA广告组日报与优化";
 
 // —— 优化规则阈值（都可调；建议基于「近3日」窗口，比单日稳）——
@@ -32,6 +28,7 @@ const THRESH = {
   ctrCut: 8,
   newCost: 120,     // 新广告组近3日花费<此 → 视为测试期，给缓冲
   minDayCost: 1,    // 昨日花费<此的广告组当噪声跳过（不进日报）
+  minAdCost: 10,    // 素材近3日花费<此 → 信号不足，不判「可加量」
 };
 
 const r2 = (n) => Math.round(Number(n || 0) * 100) / 100;
@@ -93,6 +90,28 @@ async function computeRows(target) {
     GROUP BY campaign_id, adset_id`, [ACCOUNT_IDS])).rows;
   const fsmap = Object.fromEntries(fs.map((r) => [r.campaign_id + "|" + r.adset_id, r.first_seen]));
 
+  // 每个广告组内「可加量素材」：近3日窗口，素材(ad)级 CTR/CPC 达放量门槛且有花费信号 → 列出；无则「无」。
+  const ads = (await query(`
+    SELECT campaign_id, adset_id, ad_name,
+           SUM(cost)::float8 c, SUM(impression)::bigint imp, SUM(click)::bigint clk
+    FROM ad_daily
+    WHERE account_id = ANY($1) AND date > $2::date - 3 AND date <= $2::date
+    GROUP BY campaign_id, adset_id, ad_name`, [ACCOUNT_IDS, target])).rows;
+  const adsByAdset = {};
+  for (const a of ads) {
+    const c = Number(a.c), imp = Number(a.imp), clk = Number(a.clk);
+    if (c < THRESH.minAdCost) continue;                        // 花费太小、无信号
+    const ctr = imp ? clk / imp * 100 : 0, cpc = clk ? c / clk : 0;
+    if (ctr >= THRESH.ctrScale && cpc <= THRESH.cpcScale) {     // 达放量门槛 = 可加量
+      const k = a.campaign_id + "|" + a.adset_id;
+      (adsByAdset[k] ||= []).push({ name: (a.ad_name || "?").slice(0, 24), ctr, cpc });
+    }
+  }
+  const scalableFor = (k) => {
+    const list = (adsByAdset[k] || []).sort((x, y) => y.ctr - x.ctr);
+    return list.length ? list.map((a) => `${a.name}(CTR${r2(a.ctr)}%/CPC$${r2(a.cpc)})`).join(" · ") : "无";
+  };
+
   // 当日大盘单价：账户花费 ÷ fb 注册(cash_ready_show, source=fb)。
   // ⚠️ BytePlus 注册数据比 XMP 花费滞后约 1 天 → 用「最近有注册数据的日」(≤target) 算 CPA，
   //    否则最新一天 fb 注册=0、CPA 恒为 N/A。CTR/CPC(决策依据)仍用 target 当天的新鲜花费。
@@ -125,7 +144,7 @@ async function computeRows(target) {
       cost: r2(cost), impression: imp, click: clk,
       ctr: r2(ctr), cpc: r2(cpc), cost3: r2(cost3), ctr3: r2(ctr3), cpc3: r2(cpc3),
       is_new: isNew, action: dec.action, priority: dec.priority, reason: dec.reason,
-      acct_cpa: acctCpa,
+      acct_cpa: acctCpa, scalable_ads: scalableFor(k),
     };
   });
   // 排序：优先级升序 → 花费降序（要处理的排前面）
@@ -150,6 +169,7 @@ async function writePg(target, rows) {
       { name: "cost3", type: "numeric" }, { name: "ctr3", type: "numeric" }, { name: "cpc3", type: "numeric" },
       { name: "is_new", type: "boolean" }, { name: "action", type: "text" },
       { name: "priority", type: "int" }, { name: "reason", type: "text" }, { name: "acct_cpa", type: "numeric" },
+      { name: "scalable_ads", type: "text" },
     ], rows);
   });
 }
@@ -173,6 +193,7 @@ const FEISHU_FIELDS = [
   { field_name: "近3日CTR%", type: FT.NUMBER },
   { field_name: "近3日CPC", type: FT.NUMBER },
   { field_name: "理由", type: FT.TEXT },
+  { field_name: "可加量素材", type: FT.TEXT },
   { field_name: "大盘CPA", type: FT.NUMBER },
 ];
 
@@ -184,7 +205,7 @@ function toFeishu(r) {
     状态: r.is_new ? "新" : "在跑", 建议: r.action, 优先级: r.priority,
     昨日花费: r.cost, "昨日CTR%": r.ctr, 昨日CPC: r.cpc,
     近3日花费: r.cost3, "近3日CTR%": r.ctr3, 近3日CPC: r.cpc3,
-    理由: r.reason, 大盘CPA: r.acct_cpa ?? 0,
+    理由: r.reason, 可加量素材: r.scalable_ads || "无", 大盘CPA: r.acct_cpa ?? 0,
   };
 }
 
@@ -195,7 +216,16 @@ async function ensureFeishuTable() {
     console.log(`  ✅ 建飞书表「${FEISHU_TABLE}」table_id=${id}`);
     return id;
   }
-  return (await tableIdMap())[FEISHU_TABLE];
+  const tableId = (await tableIdMap())[FEISHU_TABLE];
+  // 已存在的表：补齐缺失字段（如新增「可加量素材」列），旧数据不动。
+  const have = new Set((await listFields(tableId)).map((f) => f.field_name));
+  for (const f of FEISHU_FIELDS) {
+    if (!have.has(f.field_name)) {
+      await createField(tableId, { field_name: f.field_name, type: f.type, ...(f.property ? { property: f.property } : {}) });
+      console.log(`  ➕ 补飞书字段：${f.field_name}`);
+    }
+  }
+  return tableId;
 }
 
 async function writeFeishu(target, rows) {

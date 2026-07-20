@@ -182,3 +182,28 @@ CREATE TABLE IF NOT EXISTS adgroup_daily_report (
 );
 CREATE INDEX IF NOT EXISTS adgroup_daily_report_date_idx ON adgroup_daily_report (date);
 
+-- adgroup_daily_report 补列：可加量素材（该广告组内 CTR/CPC 达放量门槛的素材列表；无则「无」）
+ALTER TABLE adgroup_daily_report ADD COLUMN IF NOT EXISTS scalable_ads text NOT NULL DEFAULT '';
+
+-- ========== ad_daily：date × 账户 × 系列 × 广告组 × 素材(ad) 花费（来自 XMP ad 级，仅活跃 PWA 账户）==========
+-- 由 fetch-ads.mjs 按 account_id 过滤拉取（只拉 lib/pwa-accounts 的活跃账户，轻量）。
+-- 用途：daily-adgroup-report 据此算每个广告组内「可加量素材」。注册不能归因到素材，故只有 CTR/CPC 代理指标。
+CREATE TABLE IF NOT EXISTS ad_daily (
+  date          date          NOT NULL,
+  account_id    text          NOT NULL,
+  account_name  text          NOT NULL,
+  campaign_id   text          NOT NULL,
+  adset_id      text          NOT NULL DEFAULT '_',
+  adset_name    text          NOT NULL DEFAULT '_',
+  ad_id         text          NOT NULL,
+  ad_name       text          NOT NULL DEFAULT '',
+  cost          numeric(18,4) NOT NULL DEFAULT 0,
+  impression    bigint        NOT NULL DEFAULT 0,
+  click         bigint        NOT NULL DEFAULT 0,
+  updated_at    timestamptz   NOT NULL DEFAULT now(),
+  PRIMARY KEY (date, account_id, campaign_id, adset_id, ad_id)
+);
+CREATE INDEX IF NOT EXISTS ad_daily_date_idx ON ad_daily (date);
+CREATE INDEX IF NOT EXISTS ad_daily_adset_date_idx ON ad_daily (account_id, adset_id, date);
+
+
