@@ -19,8 +19,9 @@ export const BYTEPLUS = {
   sk: env.BYTEPLUS_SK || "",
   appId: Number(env.BYTEPLUS_APP_ID || 653834),
   igAuthEvent: env.BYTEPLUS_IG_AUTH_EVENT || "pwa_ins_login_button_click",
-  // 官方报表锚 US/Eastern（数据口径-BytePlus计算方法.md §3）；漏斗按天口径与官方对齐。
-  timezone: env.BYTEPLUS_TIMEZONE || "US/Eastern",
+  // 时区口径：2026-07 起 BytePlus 项目时区改为 Asia/Shanghai，与 XMP(上海) 对齐 → 漏斗不再比花费滞后 1 天。
+  // （历史上曾锚 US/Eastern 以对齐官方报表；官方已迁上海，故这里同步改。数据口径-BytePlus计算方法.md §3 的 ET 时间戳仅影响 report 类回补，另行处理。）
+  timezone: env.BYTEPLUS_TIMEZONE || "Asia/Shanghai",
 };
 
 export const SETTINGS = {
