@@ -29,6 +29,10 @@ const THRESH = {
   newCost: 120,     // 新广告组近3日花费<此 → 视为测试期，给缓冲
   minDayCost: 1,    // 昨日花费<此的广告组当噪声跳过（不进日报）
   minAdCost: 10,    // 素材近3日花费<此 → 信号不足，不判「可加量」
+  // 素材「可加量」门槛（独立于广告组放量门槛，更松、以 CTR 为主）：
+  //   CTR 为主信号(高点击率=好素材)，CPC 只作软上限，避免误杀「高CTR略贵」的赢家素材。
+  adCtrGood: 8,     // 素材 CTR≥此（≈账户均值以上）
+  adCpcMax: 0.40,   // 素材 CPC≤此（软上限）
 };
 
 const r2 = (n) => Math.round(Number(n || 0) * 100) / 100;
@@ -102,7 +106,7 @@ async function computeRows(target) {
     const c = Number(a.c), imp = Number(a.imp), clk = Number(a.clk);
     if (c < THRESH.minAdCost) continue;                        // 花费太小、无信号
     const ctr = imp ? clk / imp * 100 : 0, cpc = clk ? c / clk : 0;
-    if (ctr >= THRESH.ctrScale && cpc <= THRESH.cpcScale) {     // 达放量门槛 = 可加量
+    if (ctr >= THRESH.adCtrGood && cpc <= THRESH.adCpcMax) {    // CTR 为主、CPC 软上限 = 可加量
       const k = a.campaign_id + "|" + a.adset_id;
       (adsByAdset[k] ||= []).push({ name: (a.ad_name || "?").slice(0, 24), ctr, cpc });
     }
