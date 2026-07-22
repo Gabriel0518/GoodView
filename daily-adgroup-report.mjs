@@ -17,38 +17,44 @@ import { ACTIVE_PWA_ACCOUNTS as ACCOUNTS, ACTIVE_PWA_ACCOUNT_IDS as ACCOUNT_IDS 
 // 活跃 PWA 账户唯一事实源在 lib/pwa-accounts.mjs（加/减账户改那一处，报表+素材抓取都跟着变）。
 const FEISHU_TABLE = "PWA广告组日报与优化";
 
-// —— 优化规则阈值（都可调；建议基于「近3日」窗口，比单日稳）——
+// —— 优化规则阈值：分渠道（Facebook / TikTok 口径不同）——
+// Facebook 已按实测校准；TikTok 现无真实花费数据，暂沿用 FB 值（独立可调），起量后按 TikTok 实测重设。
+const CH_THRESH = {
+  facebook: {
+    ctrDead: 4.5, ctrScale: 9.8, cpcScale: 0.30, ctrPause: 6, cpcPause: 0.45,
+    cutCost: 300, ctrCut: 8, adCtrGood: 8, adCpcMax: 0.40,
+  },
+  tiktok: { // ⚠️ 临时=FB 值，待 TikTok 起量后按实测校准（TikTok CTR/CPC 基准与 FB 不同）
+    ctrDead: 4.5, ctrScale: 9.8, cpcScale: 0.30, ctrPause: 6, cpcPause: 0.45,
+    cutCost: 300, ctrCut: 8, adCtrGood: 8, adCpcMax: 0.40,
+  },
+};
+const chT = (channel) => CH_THRESH[channel] || CH_THRESH.facebook;
+// 渠道 → 注册来源（funnel source）：facebook=fb / tiktok=tt。大盘 CPA 分渠道算。
+const CH_SOURCE = { facebook: "fb", tiktok: "tt" };
+
+// —— 跨渠道通用阈值 ——
 const THRESH = {
-  ctrDead: 4.5,     // 近3日 CTR 低于此 → 直接暂停（哪怕新）
-  ctrScale: 9.8,    // 放量门槛：CTR≥此
-  cpcScale: 0.30,   // 放量门槛：CPC≤此
-  ctrPause: 6,      // CTR 低于此 → 暂停
-  cpcPause: 0.45,   // CPC 高于此 → 暂停
-  cutCost: 300,     // 近3日花费≥此 且 CTR<ctrCut → 砍预算
-  ctrCut: 8,
   newCost: 120,     // 新广告组近3日花费<此 → 视为测试期，给缓冲
   minDayCost: 1,    // 昨日花费<此的广告组当噪声跳过（不进日报）
   minAdCost: 10,    // 素材近3日花费<此 → 信号不足，不判「可加量」
-  // 素材「可加量」门槛（独立于广告组放量门槛，更松、以 CTR 为主）：
-  //   CTR 为主信号(高点击率=好素材)，CPC 只作软上限，避免误杀「高CTR略贵」的赢家素材。
-  adCtrGood: 8,     // 素材 CTR≥此（≈账户均值以上）
-  adCpcMax: 0.40,   // 素材 CPC≤此（软上限）
 };
 
 const r2 = (n) => Math.round(Number(n || 0) * 100) / 100;
 
-// 规则引擎：入近3日 CTR%/CPC$/花费 + 是否新 → { action, priority, reason }
-function decide({ ctr3, cpc3, cost3, isNew }) {
+// 规则引擎：入渠道 + 近3日 CTR%/CPC$/花费 + 是否新 → { action, priority, reason }。门槛按渠道取。
+function decide(channel, { ctr3, cpc3, cost3, isNew }) {
+  const T = chT(channel);
   const c = r2(ctr3), p = r2(cpc3), s = Math.round(cost3);
-  if (ctr3 < THRESH.ctrDead)
+  if (ctr3 < T.ctrDead)
     return { action: "暂停", priority: 1, reason: `近3日CTR ${c}% 极低，点击经济性差、直接拖高注册单价，停` };
   if (isNew && cost3 < THRESH.newCost)
-    return { action: "测试观察", priority: 4, reason: `新广告组测试期(近3日$${s})：满$50或2天，CTR<8%或CPC>$0.30即淘汰、达标转放量` };
-  if (ctr3 >= THRESH.ctrScale && cpc3 <= THRESH.cpcScale)
+    return { action: "测试观察", priority: 4, reason: `新广告组测试期(近3日$${s})：满$50或2天，CTR<${T.ctrPause}%或CPC>$${T.cpcScale}即淘汰、达标转放量` };
+  if (ctr3 >= T.ctrScale && cpc3 <= T.cpcScale)
     return { action: "放量", priority: 1, reason: `CTR ${c}%、CPC $${p}，效率佳 → 日预算+20%(≤20%/天防重进学习期)` };
-  if (cpc3 > THRESH.cpcPause || ctr3 < THRESH.ctrPause)
+  if (cpc3 > T.cpcPause || ctr3 < T.ctrPause)
     return { action: "暂停", priority: 2, reason: `CTR ${c}% / CPC $${p} 点击经济性差，暂停或换素材` };
-  if (cost3 >= THRESH.cutCost && ctr3 < THRESH.ctrCut)
+  if (cost3 >= T.cutCost && ctr3 < T.ctrCut)
     return { action: "砍预算", priority: 2, reason: `近3日花$${s}但CTR仅${c}%，性价比低 → 日预算砍50%` };
   return { action: "维持", priority: 5, reason: `CTR ${c}%、CPC $${p}，中等，维持观察` };
 }
@@ -69,14 +75,16 @@ async function resolveTargetDate(argDate) {
 }
 
 async function computeRows(target) {
-  // 昨日：每个在跑广告组（有花费）
+  // 昨日：每个在跑广告组（有花费），带渠道
   const day = (await query(`
-    SELECT account_id, account_name, campaign_id, campaign_name, adset_id, adset_name,
+    SELECT account_id, account_name, channel, campaign_id, campaign_name, adset_id, adset_name,
            SUM(cost)::float8 cost, SUM(impression)::bigint impression, SUM(click)::bigint click
     FROM campaign_daily
     WHERE account_id = ANY($1) AND date = $2 AND cost >= $3
-    GROUP BY account_id, account_name, campaign_id, campaign_name, adset_id, adset_name`,
+    GROUP BY account_id, account_name, channel, campaign_id, campaign_name, adset_id, adset_name`,
     [ACCOUNT_IDS, target, THRESH.minDayCost])).rows;
+  // 广告组 → 渠道（素材门槛/CPA 分渠道用；一个广告组只属一个渠道）
+  const chByAdset = Object.fromEntries(day.map((d) => [d.campaign_id + "|" + d.adset_id, d.channel]));
 
   // 近3日窗口（含目标日）：作建议依据
   const w3 = (await query(`
@@ -106,8 +114,9 @@ async function computeRows(target) {
     const c = Number(a.c), imp = Number(a.imp), clk = Number(a.clk);
     if (c < THRESH.minAdCost) continue;                        // 花费太小、无信号
     const ctr = imp ? clk / imp * 100 : 0, cpc = clk ? c / clk : 0;
-    if (ctr >= THRESH.adCtrGood && cpc <= THRESH.adCpcMax) {    // CTR 为主、CPC 软上限 = 可加量
-      const k = a.campaign_id + "|" + a.adset_id;
+    const k = a.campaign_id + "|" + a.adset_id;
+    const T = chT(chByAdset[k]);                                // 门槛按该广告组渠道取
+    if (ctr >= T.adCtrGood && cpc <= T.adCpcMax) {             // CTR 为主、CPC 软上限 = 可加量
       (adsByAdset[k] ||= []).push({ name: a.ad_name || "?", ctr, cpc });  // 完整素材名，不截断
     }
   }
@@ -116,18 +125,21 @@ async function computeRows(target) {
     return list.length ? list.map((a) => `${a.name}(CTR${r2(a.ctr)}%/CPC$${r2(a.cpc)})`).join(" · ") : "无";
   };
 
-  // 当日大盘单价：账户花费 ÷ fb 注册(cash_ready_show, source=fb)。
-  // ⚠️ BytePlus 注册数据比 XMP 花费滞后约 1 天 → 用「最近有注册数据的日」(≤target) 算 CPA，
-  //    否则最新一天 fb 注册=0、CPA 恒为 N/A。CTR/CPC(决策依据)仍用 target 当天的新鲜花费。
+  // 当日大盘单价（分渠道）：facebook=fb花费÷fb注册、tiktok=tt花费÷tt注册。
+  // ⚠️ BytePlus 注册数据比 XMP 花费滞后约 1 天 → 用「最近有注册数据的日」(≤target) 算 CPA。
   const funnelMax = (await query(`SELECT MAX(date)::text a FROM funnel_daily`)).rows[0].a;
   const cpaDate = funnelMax && funnelMax < target ? funnelMax : target;
-  const acctCost = (await query(
-    `SELECT COALESCE(SUM(cost),0)::float8 c FROM campaign_daily WHERE account_id = ANY($1) AND date = $2`,
-    [ACCOUNT_IDS, cpaDate])).rows[0].c;
-  const fbReg = (await query(
-    `SELECT COALESCE(SUM(count),0)::int n FROM funnel_daily
-     WHERE stage_key='cash_ready_show' AND source='fb' AND date = $1`, [cpaDate])).rows[0].n;
-  const acctCpa = fbReg > 0 ? r2(acctCost / fbReg) : null;
+  const cpaByChannel = {};
+  for (const [channel, src] of Object.entries(CH_SOURCE)) {
+    const cost = (await query(
+      `SELECT COALESCE(SUM(cost),0)::float8 c FROM campaign_daily
+       WHERE account_id = ANY($1) AND channel = $2 AND date = $3`,
+      [ACCOUNT_IDS, channel, cpaDate])).rows[0].c;
+    const reg = (await query(
+      `SELECT COALESCE(SUM(count),0)::int n FROM funnel_daily
+       WHERE stage_key='cash_ready_show' AND source=$1 AND date = $2`, [src, cpaDate])).rows[0].n;
+    cpaByChannel[channel] = (cost > 0 && reg > 0) ? r2(cost / reg) : null;
+  }
 
   const rows = day.map((d) => {
     const k = d.campaign_id + "|" + d.adset_id;
@@ -140,20 +152,21 @@ async function computeRows(target) {
     const ctr3 = imp3 ? clk3 / imp3 * 100 : 0;
     const cpc3 = clk3 ? cost3 / clk3 : 0;
     const isNew = (fsmap[k] || "0000") >= subDays(target, 2); // 首见在近3天内
-    const dec = decide({ ctr3, cpc3, cost3, isNew });
+    const channel = d.channel || "facebook";
+    const dec = decide(channel, { ctr3, cpc3, cost3, isNew });
     return {
-      date: target, account_id: d.account_id, account_name: d.account_name,
+      date: target, account_id: d.account_id, account_name: d.account_name, channel,
       campaign_id: d.campaign_id, campaign_name: d.campaign_name || "",
       adset_id: d.adset_id, adset_name: d.adset_name || "",
       cost: r2(cost), impression: imp, click: clk,
       ctr: r2(ctr), cpc: r2(cpc), cost3: r2(cost3), ctr3: r2(ctr3), cpc3: r2(cpc3),
       is_new: isNew, action: dec.action, priority: dec.priority, reason: dec.reason,
-      acct_cpa: acctCpa, scalable_ads: scalableFor(k),
+      acct_cpa: cpaByChannel[channel] ?? null, scalable_ads: scalableFor(k),
     };
   });
-  // 排序：优先级升序 → 花费降序（要处理的排前面）
-  rows.sort((a, b) => a.priority - b.priority || b.cost - a.cost);
-  return { rows, acctCost: r2(acctCost), fbReg, acctCpa, cpaDate };
+  // 排序：渠道 → 优先级升序 → 花费降序（同渠道聚在一起，要处理的排前面）
+  rows.sort((a, b) => a.channel.localeCompare(b.channel) || a.priority - b.priority || b.cost - a.cost);
+  return { rows, cpaByChannel, cpaDate };
 }
 
 function subDays(ymd, n) {
@@ -166,6 +179,7 @@ async function writePg(target, rows) {
     await client.query(`DELETE FROM adgroup_daily_report WHERE date = $1`, [target]);
     await bulkInsert(client, "adgroup_daily_report", [
       { name: "date", type: "date" }, { name: "account_id", type: "text" }, { name: "account_name", type: "text" },
+      { name: "channel", type: "text" },
       { name: "campaign_id", type: "text" }, { name: "campaign_name", type: "text" },
       { name: "adset_id", type: "text" }, { name: "adset_name", type: "text" },
       { name: "cost", type: "numeric" }, { name: "impression", type: "bigint" }, { name: "click", type: "bigint" },
@@ -182,7 +196,8 @@ const FEISHU_FIELDS = [
   { field_name: "标识", type: FT.TEXT },
   { field_name: "日期", type: FT.DATE },
   { field_name: "date_num", type: FT.NUMBER },
-  { field_name: "账户", type: FT.SINGLE_SELECT, property: { options: ACCOUNTS.map((a, i) => ({ name: a.name, color: i })) } },
+  { field_name: "账户", type: FT.SINGLE_SELECT, property: { options: ACCOUNTS.map((a, i) => ({ name: a.name, color: i % 10 })) } },
+  { field_name: "渠道", type: FT.SINGLE_SELECT, property: { options: [{ name: "facebook", color: 1 }, { name: "tiktok", color: 3 }] } },
   { field_name: "系列", type: FT.TEXT },
   { field_name: "广告组", type: FT.TEXT },
   { field_name: "状态", type: FT.SINGLE_SELECT, property: { options: [{ name: "新", color: 1 }, { name: "在跑", color: 0 }] } },
@@ -205,7 +220,7 @@ function toFeishu(r) {
   return {
     标识: `${r.date}|${r.account_id}|${r.campaign_id}|${r.adset_id}`,
     日期: dateMs(r.date), date_num: dateNum(r.date),
-    账户: r.account_name, 系列: r.campaign_name, 广告组: r.adset_name,
+    账户: r.account_name, 渠道: r.channel || "facebook", 系列: r.campaign_name, 广告组: r.adset_name,
     状态: r.is_new ? "新" : "在跑", 建议: r.action, 优先级: r.priority,
     昨日花费: r.cost, "昨日CTR%": r.ctr, 昨日CPC: r.cpc,
     近3日花费: r.cost3, "近3日CTR%": r.ctr3, 近3日CPC: r.cpc3,
@@ -249,10 +264,11 @@ async function main() {
   if (!argDate && maxDate && maxDate < target) {
     console.warn(`  ⚠️ 前一天(${target}) 还没入库，改用最新完整日 ${maxDate}`);
   }
-  const { rows, acctCost, fbReg, acctCpa, cpaDate } = await computeRows(target);
+  const { rows, cpaByChannel, cpaDate } = await computeRows(target);
   if (!rows.length) { console.warn("  ⚠️ 目标日无在跑广告组（可能数据未到），退出。"); return; }
   const cpaNote = cpaDate === target ? "" : `（注册滞后，CPA 按 ${cpaDate} 结算日计）`;
-  console.log(`  ${ACCOUNTS.map((a) => a.name).join("/")} 花费=$${acctCost} · fb注册=${fbReg} · 大盘CPA=${acctCpa == null ? "N/A" : "$" + acctCpa} ${cpaNote}`);
+  const cpaStr = Object.entries(cpaByChannel).map(([c, v]) => `${c}=${v == null ? "N/A" : "$" + v}`).join(" · ");
+  console.log(`  大盘CPA(分渠道): ${cpaStr} ${cpaNote}`);
   await writePg(target, rows);
   console.log(`  ✅ Postgres adgroup_daily_report：写 ${rows.length} 行`);
   await writeFeishu(target, rows);

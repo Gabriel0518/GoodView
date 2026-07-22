@@ -184,6 +184,8 @@ CREATE INDEX IF NOT EXISTS adgroup_daily_report_date_idx ON adgroup_daily_report
 
 -- adgroup_daily_report 补列：可加量素材（该广告组内 CTR/CPC 达放量门槛的素材列表；无则「无」）
 ALTER TABLE adgroup_daily_report ADD COLUMN IF NOT EXISTS scalable_ads text NOT NULL DEFAULT '';
+-- adgroup_daily_report 补列：渠道（facebook / tiktok）——分渠道口径与展示
+ALTER TABLE adgroup_daily_report ADD COLUMN IF NOT EXISTS channel text NOT NULL DEFAULT 'facebook';
 
 -- ========== ad_daily：date × 账户 × 系列 × 广告组 × 素材(ad) 花费（来自 XMP ad 级，仅活跃 PWA 账户）==========
 -- 由 fetch-ads.mjs 按 account_id 过滤拉取（只拉 lib/pwa-accounts 的活跃账户，轻量）。
