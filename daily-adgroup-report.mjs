@@ -64,12 +64,13 @@ async function resolveTargetDate(argDate) {
   const maxRow = await query(
     `SELECT MAX(date)::text AS mx FROM campaign_daily WHERE account_id = ANY($1)`, [ACCOUNT_IDS]);
   const maxDate = maxRow.rows[0].mx; // YYYY-MM-DD
-  if (argDate) return { target: argDate, maxDate };
-  // 前一天(UTC+8) = now+8h 再退一天，取日期部分
-  const nowU8 = new Date(Date.now() + 8 * 3600 * 1000);
-  const y = new Date(nowU8); y.setUTCDate(y.getUTCDate() - 1);
+  // 前一天(上海) = 最后一个完整日。优化建议只基于跑完的完整日 → 目标日绝不为「今天/未来」。
+  const todayU8 = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date());
+  const y = new Date(todayU8 + "T00:00:00Z"); y.setUTCDate(y.getUTCDate() - 1);
   const yesterday = y.toISOString().slice(0, 10);
-  // 若昨天还没入库（拉取延迟），用库里最新日
+  // 传参也受「≤昨天」约束：即使显式传今天，也夹到昨天，防止把进行中的当天写进优化表。
+  if (argDate) return { target: argDate > yesterday ? yesterday : argDate, maxDate, clamped: argDate > yesterday };
+  // 若昨天还没入库（拉取延迟），用库里最新完整日（也 ≤ 昨天）
   const target = maxDate && maxDate < yesterday ? maxDate : yesterday;
   return { target, maxDate };
 }

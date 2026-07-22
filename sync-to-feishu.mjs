@@ -11,10 +11,11 @@ import { buildTables } from "./feishu-tables.mjs";
 import { FEISHU } from "./config.mjs";
 
 function windowDates(days) {
+  // 上海时区「今天」为窗口结束日（含当天进行中数据；BytePlus/XMP 均已支持拉当天）。
+  const todayStr = new Intl.DateTimeFormat("en-CA", { timeZone: "Asia/Shanghai" }).format(new Date()); // YYYY-MM-DD
+  const endD = new Date(todayStr + "T00:00:00Z");
+  const startD = new Date(endD); startD.setUTCDate(startD.getUTCDate() - (days - 1));
   const ymd = (d) => d.toISOString().slice(0, 10);
-  const today = new Date();
-  const endD = new Date(today); endD.setDate(endD.getDate() - 1);   // 昨天（最后一个完整日）
-  const startD = new Date(today); startD.setDate(startD.getDate() - days);
   return { from: ymd(startD), to: ymd(endD) };
 }
 
