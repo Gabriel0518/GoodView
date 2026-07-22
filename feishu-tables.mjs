@@ -312,23 +312,23 @@ const aiguildSummaryTable = (campaigns) => ({
     { field_name: "成材单价", type: FT.NUMBER },
   ],
   sql: (from, to) => {
-    // 每指标一个相关子查询，按 pr.days 滚动窗口（锚定 to=昨天）；人数口径随 2026-07-03 切换。
+    // 「今日」行锚 to(今天)；「近N日」行锚 to-1(昨天，完整日)。人数口径随 2026-07-03 切换。
     const ppl = (stage) =>
       `(SELECT COALESCE(SUM(count),0) FROM funnel_daily
-        WHERE date > $2::date - pr.days AND date <= $2::date AND stage_key='${stage}'
+        WHERE date > $2::date - pr.ao - pr.days AND date <= $2::date - pr.ao AND stage_key='${stage}'
           AND ((date <  DATE '${AIGUILD_SPLIT_DATE}' AND source = 'AIguild')
             OR (date >= DATE '${AIGUILD_SPLIT_DATE}' AND source IN ('AIguild_active','AIguild_passive'))))`;
     return {
       text: `
-        SELECT pr.label AS caliber, pr.days AS ord,
+        SELECT pr.label AS caliber, pr.ord AS ord,
           (SELECT COALESCE(SUM(cost),0)::float8 FROM campaign_daily
-           WHERE campaign_id = ANY($1) AND date > $2::date - pr.days AND date <= $2::date) AS cost,
+           WHERE campaign_id = ANY($1) AND date > $2::date - pr.ao - pr.days AND date <= $2::date - pr.ao) AS cost,
           ${ppl(AIGUILD_STAGES.reg)} AS reg,
           ${ppl(AIGUILD_STAGES.wd)}  AS wd,
           ${ppl(AIGUILD_STAGES.ig)}  AS ig,
           ${ppl(AIGUILD_STAGES.cc)}  AS cc
-        FROM (VALUES (1::int,'近1日'),(7,'近7日'),(14,'近14日'),(30,'近30日')) pr(days,label)
-        ORDER BY pr.days`,
+        FROM (VALUES (0::int,0::int,1::int,'今日'),(1,1,1,'近1日'),(7,1,7,'近7日'),(14,1,14,'近14日'),(30,1,30,'近30日')) pr(ord,ao,days,label)
+        ORDER BY pr.ord`,
       params: [campaigns, to],
     };
   },
@@ -454,20 +454,21 @@ const pwaSummaryTable = (accounts) => ({
     { field_name: "成材单价", type: FT.NUMBER },
   ],
   sql: (from, to) => {
+    // 「今日」行锚 to(今天)；「近N日」行锚 to-1(昨天，完整日)。用 pr.ao(锚偏移) 区分。
     const ppl = (stage) =>
       `(SELECT COALESCE(SUM(count),0) FROM funnel_daily
-        WHERE date > $2::date - pr.days AND date <= $2::date AND stage_key='${stage}' AND ${PWA_PPL_SOURCE})`;
+        WHERE date > $2::date - pr.ao - pr.days AND date <= $2::date - pr.ao AND stage_key='${stage}' AND ${PWA_PPL_SOURCE})`;
     return {
       text: `
-        SELECT pr.label AS caliber, pr.days AS ord,
+        SELECT pr.label AS caliber, pr.ord AS ord,
           (SELECT COALESCE(SUM(cost),0)::float8 FROM campaign_daily
-           WHERE account_id = ANY($1) AND date > $2::date - pr.days AND date <= $2::date) AS cost,
+           WHERE account_id = ANY($1) AND date > $2::date - pr.ao - pr.days AND date <= $2::date - pr.ao) AS cost,
           ${ppl(AIGUILD_STAGES.reg)} AS reg,
           ${ppl(AIGUILD_STAGES.wd)}  AS wd,
           ${ppl(AIGUILD_STAGES.ig)}  AS ig,
           ${ppl(AIGUILD_STAGES.cc)}  AS cc
-        FROM (VALUES (1::int,'近1日'),(7,'近7日'),(14,'近14日'),(30,'近30日')) pr(days,label)
-        ORDER BY pr.days`,
+        FROM (VALUES (0::int,0::int,1::int,'今日'),(1,1,1,'近1日'),(7,1,7,'近7日'),(14,1,14,'近14日'),(30,1,30,'近30日')) pr(ord,ao,days,label)
+        ORDER BY pr.ord`,
       params: [accounts, to],
     };
   },

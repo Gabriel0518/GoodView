@@ -5,9 +5,9 @@ import { spawn } from "node:child_process";
 import { query, end } from "./lib/db.mjs";
 import { SETTINGS, FEISHU } from "./config.mjs";
 
-function run(cmd, args) {
+function run(cmd, args, env) {
   return new Promise((resolve) => {
-    const p = spawn(cmd, args, { stdio: "inherit" });
+    const p = spawn(cmd, args, { stdio: "inherit", env: env ? { ...process.env, ...env } : process.env });
     p.on("close", (code) => resolve(code ?? 1));
     p.on("error", () => resolve(1));
   });
@@ -41,9 +41,11 @@ async function main() {
     if (cfgCode !== 0) console.warn(`  ⚠️ 配置同步返回 ${cfgCode}（用 DB 上次配置继续）`);
   }
 
+  // XMP 花费/素材含当天（INCLUDE_TODAY）：实时镜像表/汇总「今日」行需要当天花费。
+  // 优化表(daily-adgroup-report)已把目标日夹到「昨天」，不受含当天影响。
   const [snapCode, funnelCode] = await Promise.all([
-    run("node", ["fetch-snapshot.mjs", ...daysArg]),
-    run("node", ["fetch-funnel.mjs", ...daysArg]),
+    run("node", ["fetch-snapshot.mjs", ...daysArg], { INCLUDE_TODAY: "1" }),
+    run("node", ["fetch-funnel.mjs", ...daysArg]),  // funnel 已默认含当天
   ]);
 
   // 留存快照（BytePlus sitin 看板报表）——独立、失败不影响主库；写 retention_summary。
@@ -52,7 +54,7 @@ async function main() {
 
   // 素材(ad)级抓取（仅活跃 PWA 账户，account_id 过滤，轻量）——写 ad_daily，供广告组日报算「可加量素材」。
   // 在 snapshot 之后跑，避开 XMP QPM 争抢；失败不影响主库/退出码。
-  const adsCode = await run("node", ["fetch-ads.mjs"]);
+  const adsCode = await run("node", ["fetch-ads.mjs"], { INCLUDE_TODAY: "1" });
   if (adsCode !== 0) console.warn(`  ⚠️ 素材级拉取返回 ${adsCode}（不影响主流程）`);
 
   const ok = snapCode === 0 && funnelCode === 0;
