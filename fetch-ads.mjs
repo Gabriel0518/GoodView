@@ -19,7 +19,8 @@ const COLS = [
 async function main() {
   const days = Number(process.argv[2]) || 10;
   const today = new Date();
-  const end_ = new Date(today); end_.setDate(end_.getDate() - 1);   // 昨天（最后完整日）
+  const end_ = new Date(today);
+  if (!process.env.INCLUDE_TODAY) end_.setDate(end_.getDate() - 1);   // 默认到昨天；INCLUDE_TODAY=1 含今天（当天进行中）
   const start = new Date(today); start.setDate(start.getDate() - days);
   const [startDate, endDate] = [ymd(start), ymd(end_)];
   if (!ACTIVE_PWA_ACCOUNT_IDS.length) { console.log("[ads] 无活跃账户，跳过。"); return; }

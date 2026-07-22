@@ -89,7 +89,8 @@ async function loadXmpConfig() {
 async function main() {
   const days = Number(process.argv[2]) || SETTINGS.defaultLookbackDays;
   const today = new Date();
-  const end_ = new Date(today); end_.setDate(end_.getDate() - 1);      // 昨天（最后完整日）
+  const end_ = new Date(today);
+  if (!process.env.INCLUDE_TODAY) end_.setDate(end_.getDate() - 1);   // 默认到昨天（最后完整日）；INCLUDE_TODAY=1 含今天（当天进行中，抢先看）
   const start = new Date(today); start.setDate(start.getDate() - days);
   const [startDate, endDate] = [ymd(start), ymd(end_)];
 
