@@ -108,7 +108,7 @@ async function computeRows(target) {
     const ctr = imp ? clk / imp * 100 : 0, cpc = clk ? c / clk : 0;
     if (ctr >= THRESH.adCtrGood && cpc <= THRESH.adCpcMax) {    // CTR 为主、CPC 软上限 = 可加量
       const k = a.campaign_id + "|" + a.adset_id;
-      (adsByAdset[k] ||= []).push({ name: (a.ad_name || "?").slice(0, 24), ctr, cpc });
+      (adsByAdset[k] ||= []).push({ name: a.ad_name || "?", ctr, cpc });  // 完整素材名，不截断
     }
   }
   const scalableFor = (k) => {
