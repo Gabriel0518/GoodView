@@ -209,3 +209,16 @@ CREATE INDEX IF NOT EXISTS ad_daily_date_idx ON ad_daily (date);
 CREATE INDEX IF NOT EXISTS ad_daily_adset_date_idx ON ad_daily (account_id, adset_id, date);
 
 
+
+-- ========== aiguild_os_daily：AI公会注册等阶段 按 os(android/ios) 拆（来自 BytePlus os_name 分组）==========
+-- 供「AI公会分端汇总」分端(安卓/iOS)看转化。注册归因不到广告组但能到 os(用户设备属性 os_name)。
+-- 由 fetch-aiguild-os.mjs 写：仅 AI公会来源(AIguild/active/passive)，按 os 聚合 4 个阶段人数。
+CREATE TABLE IF NOT EXISTS aiguild_os_daily (
+  date       date        NOT NULL,
+  stage_key  text        NOT NULL,   -- cash_ready_show / withdraw_first / task_ins_bind / chengcai
+  os         text        NOT NULL,   -- android / ios / other
+  count      bigint      NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (date, stage_key, os)
+);
+CREATE INDEX IF NOT EXISTS aiguild_os_daily_date_idx ON aiguild_os_daily (date);

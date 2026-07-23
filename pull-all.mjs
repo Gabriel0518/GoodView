@@ -57,6 +57,10 @@ async function main() {
   const adsCode = await run("node", ["fetch-ads.mjs"], { INCLUDE_TODAY: "1" });
   if (adsCode !== 0) console.warn(`  ⚠️ 素材级拉取返回 ${adsCode}（不影响主流程）`);
 
+  // AI公会分端(安卓/iOS)转化——写 aiguild_os_daily，供「AI公会分端汇总」。失败不影响主库/退出码。
+  const aiOsCode = await run("node", ["fetch-aiguild-os.mjs"]);
+  if (aiOsCode !== 0) console.warn(`  ⚠️ AI公会分端拉取返回 ${aiOsCode}（不影响主流程）`);
+
   const ok = snapCode === 0 && funnelCode === 0;
   await query(
     "UPDATE pull_runs SET finished_at = now(), ok = $2, snapshot_ok = $3, funnel_ok = $4 WHERE id = $1",

@@ -234,6 +234,12 @@ export const CONFIG_TABLES = [xmpConfigTable];
 const AIGUILD_CAMPAIGNS = ["120248092167100162", "120251189845320085", "120252738947370085", "120252739540850085"];
 const AIGUILD_SPLIT_DATE = "2026-07-03";
 const AIGUILD_STAGES = { reg: "cash_ready_show", wd: "withdraw_first", ig: "task_ins_bind", cc: "chengcai" };
+// AI公会分端(安卓/iOS)：花费按系列归端；人数按 os 归端(aiguild_os_daily)。
+// 2026-07-14 起分端投放：_and=安卓、_Ios=iOS。旧系列(07-14前)未分端 → 不计入分端花费(分端只看 07-14 后)。
+const AIGUILD_OS_CAMPAIGNS = {
+  android: ["120252738947370085"], // 0714_Customer Form_and
+  ios:     ["120252739540850085"], // 0714_Customer Form_Ios
+};
 const price = (cost, n) => (n > 0 ? Math.round((cost / n) * 100) / 100 : undefined);
 
 const aiguildTable = (campaigns) => ({
@@ -337,6 +343,61 @@ const aiguildSummaryTable = (campaigns) => ({
   toFields: (r) => {
     const cost = num(r.cost), reg = num(r.reg), wd = num(r.wd), ig = num(r.ig), cc = num(r.cc);
     const f = { 口径: r.caliber, 排序: num(r.ord), 花费: cost, 注册人数: reg, 首提人数: wd, IG授权人数: ig, 成材人数: cc };
+    const rp = price(cost, reg), wp = price(cost, wd), ip = price(cost, ig), cp = price(cost, cc);
+    if (rp !== undefined) f.注册单价 = rp;
+    if (wp !== undefined) f.首提单价 = wp;
+    if (ip !== undefined) f.IG授权单价 = ip;
+    if (cp !== undefined) f.成材单价 = cp;
+    return f;
+  },
+});
+
+// ---- AI公会分端汇总（安卓/iOS × 周期）：花费按系列归端，人数按 os 归端(aiguild_os_daily)----
+// 分端投放自 2026-07-14 起。数据量小(个位数/天)，故只出周期行(今日/近1/7/14/30日)，别按天看。
+const aiguildOsSummaryTable = () => ({
+  key: "aiguild_os_summary",
+  name: "AI公会分端汇总",
+  windowed: true,
+  fields: [
+    { field_name: "端", type: FT.SINGLE_SELECT, property: { options: [{ name: "安卓", color: 1 }, { name: "iOS", color: 3 }] } },
+    { field_name: "口径", type: FT.TEXT },
+    { field_name: "排序", type: FT.NUMBER },
+    { field_name: "花费", type: FT.NUMBER },
+    { field_name: "注册人数", type: FT.NUMBER },
+    { field_name: "注册单价", type: FT.NUMBER },
+    { field_name: "首提人数", type: FT.NUMBER },
+    { field_name: "首提单价", type: FT.NUMBER },
+    { field_name: "IG授权人数", type: FT.NUMBER },
+    { field_name: "IG授权单价", type: FT.NUMBER },
+    { field_name: "成材人数", type: FT.NUMBER },
+    { field_name: "成材单价", type: FT.NUMBER },
+  ],
+  sql: (from, to) => {
+    // os → (campaign 集合, os 桶名)；两端各出 5 个周期行。os 桶 = aiguild_os_daily.os。
+    const ppl = (stage) =>
+      `(SELECT COALESCE(SUM(count),0) FROM aiguild_os_daily
+        WHERE date > $1::date - pr.ao - pr.days AND date <= $1::date - pr.ao AND stage_key='${stage}' AND os = e.osbucket)`;
+    return {
+      text: `
+        SELECT e.label AS side, pr.label AS caliber, (e.so*100 + pr.ord) AS ord,
+          (SELECT COALESCE(SUM(cost),0)::float8 FROM campaign_daily
+           WHERE campaign_id = ANY(e.camps) AND date > $1::date - pr.ao - pr.days AND date <= $1::date - pr.ao) AS cost,
+          ${ppl(AIGUILD_STAGES.reg)} AS reg,
+          ${ppl(AIGUILD_STAGES.wd)}  AS wd,
+          ${ppl(AIGUILD_STAGES.ig)}  AS ig,
+          ${ppl(AIGUILD_STAGES.cc)}  AS cc
+        FROM (VALUES
+          (0::int,'安卓','android'::text, $2::text[]),
+          (1::int,'iOS','ios'::text,     $3::text[])
+        ) e(so,label,osbucket,camps)
+        CROSS JOIN (VALUES (0::int,0::int,1::int,'今日'),(1,1,1,'近1日'),(7,1,7,'近7日'),(14,1,14,'近14日'),(30,1,30,'近30日')) pr(ord,ao,days,label)
+        ORDER BY ord`,
+      params: [to, AIGUILD_OS_CAMPAIGNS.android, AIGUILD_OS_CAMPAIGNS.ios],
+    };
+  },
+  toFields: (r) => {
+    const cost = num(r.cost), reg = num(r.reg), wd = num(r.wd), ig = num(r.ig), cc = num(r.cc);
+    const f = { 端: r.side, 口径: r.caliber, 排序: num(r.ord), 花费: cost, 注册人数: reg, 首提人数: wd, IG授权人数: ig, 成材人数: cc };
     const rp = price(cost, reg), wp = price(cost, wd), ip = price(cost, ig), cp = price(cost, cc);
     if (rp !== undefined) f.注册单价 = rp;
     if (wp !== undefined) f.首提单价 = wp;
@@ -486,7 +547,59 @@ const pwaSummaryTable = (accounts) => ({
   },
 });
 
-// ===== 留存（快照，来自 BytePlus sitin 看板的留存报表，经 fetch-retention.mjs 落 retention_summary 表；非 Postgres 事实）=====
+// PWA渠道分源汇总（渠道 facebook/tiktok/google × 周期）：花费按 campaign_daily.channel、人数按 funnel source。
+// 渠道↔source 映射：facebook↔fb、tiktok↔tt、google↔google。⚠️ unknown/bff 归不到渠道，故三渠道之和 < 大盘总注册（打点现实，用户选「只看三渠道」）。
+const pwaChannelSummaryTable = (accounts) => ({
+  key: "pwa_channel_summary",
+  name: "PWA渠道分源汇总",
+  windowed: true,
+  fields: [
+    { field_name: "渠道", type: FT.SINGLE_SELECT, property: { options: [{ name: "Facebook", color: 1 }, { name: "TikTok", color: 3 }, { name: "Google", color: 5 }] } },
+    { field_name: "口径", type: FT.TEXT },
+    { field_name: "排序", type: FT.NUMBER },
+    { field_name: "花费", type: FT.NUMBER },
+    { field_name: "注册人数", type: FT.NUMBER },
+    { field_name: "注册单价", type: FT.NUMBER },
+    { field_name: "首提人数", type: FT.NUMBER },
+    { field_name: "首提单价", type: FT.NUMBER },
+    { field_name: "IG授权人数", type: FT.NUMBER },
+    { field_name: "IG授权单价", type: FT.NUMBER },
+    { field_name: "成材人数", type: FT.NUMBER },
+    { field_name: "成材单价", type: FT.NUMBER },
+  ],
+  sql: (from, to) => {
+    // 花费：本渠道账户集 ∩ channel=ch.channel；人数：非公会 且 source=ch.src。周期：今日锚 to、近N日锚 to-1(昨天)。
+    const ppl = (stage) =>
+      `(SELECT COALESCE(SUM(count),0) FROM funnel_daily
+        WHERE date > $2::date - pr.ao - pr.days AND date <= $2::date - pr.ao AND stage_key='${stage}'
+          AND source = ch.src)`;
+    return {
+      text: `
+        SELECT ch.label AS channel, pr.label AS caliber, (ch.so*100 + pr.ord) AS ord,
+          (SELECT COALESCE(SUM(cost),0)::float8 FROM campaign_daily
+           WHERE account_id = ANY($1) AND channel = ch.channel
+             AND date > $2::date - pr.ao - pr.days AND date <= $2::date - pr.ao) AS cost,
+          ${ppl(AIGUILD_STAGES.reg)} AS reg,
+          ${ppl(AIGUILD_STAGES.wd)}  AS wd,
+          ${ppl(AIGUILD_STAGES.ig)}  AS ig,
+          ${ppl(AIGUILD_STAGES.cc)}  AS cc
+        FROM (VALUES ('Facebook','facebook','fb',0),('TikTok','tiktok','tt',1),('Google','google','google',2)) ch(label,channel,src,so)
+        CROSS JOIN (VALUES (0::int,0::int,1::int,'今日'),(1,1,1,'近1日'),(7,1,7,'近7日'),(14,1,14,'近14日'),(30,1,30,'近30日')) pr(ord,ao,days,label)
+        ORDER BY ord`,
+      params: [accounts, to],
+    };
+  },
+  toFields: (r) => {
+    const cost = num(r.cost), reg = num(r.reg), wd = num(r.wd), ig = num(r.ig), cc = num(r.cc);
+    const f = { 渠道: r.channel, 口径: r.caliber, 排序: num(r.ord), 花费: cost, 注册人数: reg, 首提人数: wd, IG授权人数: ig, 成材人数: cc };
+    const rp = price(cost, reg), wp = price(cost, wd), ip = price(cost, ig), cp = price(cost, cc);
+    if (rp !== undefined) f.注册单价 = rp;
+    if (wp !== undefined) f.首提单价 = wp;
+    if (ip !== undefined) f.IG授权单价 = ip;
+    if (cp !== undefined) f.成材单价 = cp;
+    return f;
+  },
+});
 const retentionTable = (key, name, category) => ({
   key, name, windowed: false,
   fields: [
@@ -595,9 +708,11 @@ export async function buildTables() {
     adGroupsTable,
     aiguildTable(g.aiguildCampaigns),
     aiguildSummaryTable(g.aiguildCampaigns),
+    aiguildOsSummaryTable(),
     ...g.pwaAccounts.map((a) => pwaAccountTable(a.name, a.id)),
     pwaDailyTable(pwaAccIds),
     pwaSummaryTable(pwaAccIds),
+    pwaChannelSummaryTable(pwaAccIds),
     retentionUser,
     retentionChengcai,
   ];
