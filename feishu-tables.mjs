@@ -229,7 +229,9 @@ export const CONFIG_TABLES = [xmpConfigTable];
 // 花费 = 2 系列(0630_web_text 直发 + 0617_Customer Form_1 留咨)。
 // 人数口径随日期切换（用户确认）：2026-07-03 前 source='AIguild' 为总口径；此后拆为 active+passive。
 // 单价 = 花费 / 人数（人数为 0 则单价留空，区分「无」与「0」）。跨立方已在此 join 好，飞书仪表盘直接用。
-const AIGUILD_CAMPAIGNS = ["120248092167100162", "120251189845320085"];
+// AI公会系列：0630_web_text(直发) + 0617_Customer Form_1(留咨) 于 2026-07-14 停投；
+// 自 07-14 换成 0714_Customer Form_and(安卓) + _Ios(iOS)。四个都保留 → 花费历史连续（旧的只有 07-14 前、新的只有 07-14 后）。
+const AIGUILD_CAMPAIGNS = ["120248092167100162", "120251189845320085", "120252738947370085", "120252739540850085"];
 const AIGUILD_SPLIT_DATE = "2026-07-03";
 const AIGUILD_STAGES = { reg: "cash_ready_show", wd: "withdraw_first", ig: "task_ins_bind", cc: "chengcai" };
 const price = (cost, n) => (n > 0 ? Math.round((cost / n) * 100) / 100 : undefined);
