@@ -444,7 +444,9 @@ const pwaAccountTable = (name, accId) => ({
   }),
 });
 
-// PWA渠道日报（结构同 AI公会日报：花费=账户集合 ÷ 非公会来源人数，按日）
+// PWA渠道日报（date × 渠道 facebook/tiktok/google，按日分渠道看）：
+//   花费按 campaign_daily.channel、人数按 funnel source（渠道↔source：facebook↔fb、tiktok↔tt、google↔google）。
+//   ⚠️ unknown/bff 归不到渠道，故三渠道之和 < 大盘总注册（打点现实，本表只看三渠道）。
 const pwaDailyTable = (accounts) => ({
   key: "pwa_daily",
   name: "PWA渠道日报",
@@ -453,6 +455,7 @@ const pwaDailyTable = (accounts) => ({
     { field_name: "标识", type: FT.TEXT },
     { field_name: "日期", type: FT.DATE },
     { field_name: "date_num", type: FT.NUMBER },
+    { field_name: "渠道", type: FT.SINGLE_SELECT, property: { options: [{ name: "Facebook", color: 1 }, { name: "TikTok", color: 3 }, { name: "Google", color: 5 }] } },
     { field_name: "花费", type: FT.NUMBER },
     { field_name: "注册人数", type: FT.NUMBER },
     { field_name: "注册单价", type: FT.NUMBER },
@@ -466,28 +469,31 @@ const pwaDailyTable = (accounts) => ({
   sql: (from, to) => ({
     text: `
       WITH d AS (SELECT generate_series($1::date,$2::date,'1 day')::date date),
-      spend AS (SELECT date, SUM(cost)::float8 cost FROM campaign_daily
-                WHERE account_id = ANY($3) AND date BETWEEN $1 AND $2 GROUP BY date),
+      ch(label,channel,src,so) AS (VALUES ('Facebook','facebook','fb',0),('TikTok','tiktok','tt',1),('Google','google','google',2)),
+      spend AS (SELECT date, channel, SUM(cost)::float8 cost FROM campaign_daily
+                WHERE account_id = ANY($3) AND date BETWEEN $1 AND $2 GROUP BY date, channel),
       ppl AS (
-        SELECT date,
+        SELECT date, source,
           SUM(count) FILTER (WHERE stage_key=$4) reg,
           SUM(count) FILTER (WHERE stage_key=$5) wd,
           SUM(count) FILTER (WHERE stage_key=$6) ig,
           SUM(count) FILTER (WHERE stage_key=$7) cc
         FROM funnel_daily
-        WHERE date BETWEEN $1 AND $2 AND stage_key IN ($4,$5,$6,$7) AND ${PWA_PPL_SOURCE}
-        GROUP BY date)
-      SELECT to_char(d.date,'YYYY-MM-DD') date, COALESCE(s.cost,0) cost,
+        WHERE date BETWEEN $1 AND $2 AND stage_key IN ($4,$5,$6,$7)
+        GROUP BY date, source)
+      SELECT to_char(d.date,'YYYY-MM-DD') date, ch.label channel, ch.so so, COALESCE(s.cost,0) cost,
              COALESCE(p.reg,0) reg, COALESCE(p.wd,0) wd, COALESCE(p.ig,0) ig, COALESCE(p.cc,0) cc
-      FROM d LEFT JOIN spend s ON s.date=d.date LEFT JOIN ppl p ON p.date=d.date
+      FROM d CROSS JOIN ch
+      LEFT JOIN spend s ON s.date=d.date AND s.channel=ch.channel
+      LEFT JOIN ppl p ON p.date=d.date AND p.source=ch.src
       WHERE COALESCE(s.cost,0)>0 OR COALESCE(p.reg,0)>0 OR COALESCE(p.wd,0)>0
          OR COALESCE(p.ig,0)>0 OR COALESCE(p.cc,0)>0
-      ORDER BY d.date DESC`,
+      ORDER BY d.date DESC, ch.so`,
     params: [from, to, accounts, AIGUILD_STAGES.reg, AIGUILD_STAGES.wd, AIGUILD_STAGES.ig, AIGUILD_STAGES.cc],
   }),
   toFields: (r) => {
     const cost = num(r.cost), reg = num(r.reg), wd = num(r.wd), ig = num(r.ig), cc = num(r.cc);
-    const f = { 标识: r.date, 日期: dateMs(r.date), date_num: dateNum(r.date),
+    const f = { 标识: `${r.date}|${r.channel}`, 日期: dateMs(r.date), date_num: dateNum(r.date), 渠道: r.channel,
       花费: cost, 注册人数: reg, 首提人数: wd, IG授权人数: ig, 成材人数: cc };
     const rp = price(cost, reg), wp = price(cost, wd), ip = price(cost, ig), cp = price(cost, cc);
     if (rp !== undefined) f.注册单价 = rp;
@@ -547,59 +553,6 @@ const pwaSummaryTable = (accounts) => ({
   },
 });
 
-// PWA渠道分源汇总（渠道 facebook/tiktok/google × 周期）：花费按 campaign_daily.channel、人数按 funnel source。
-// 渠道↔source 映射：facebook↔fb、tiktok↔tt、google↔google。⚠️ unknown/bff 归不到渠道，故三渠道之和 < 大盘总注册（打点现实，用户选「只看三渠道」）。
-const pwaChannelSummaryTable = (accounts) => ({
-  key: "pwa_channel_summary",
-  name: "PWA渠道分源汇总",
-  windowed: true,
-  fields: [
-    { field_name: "渠道", type: FT.SINGLE_SELECT, property: { options: [{ name: "Facebook", color: 1 }, { name: "TikTok", color: 3 }, { name: "Google", color: 5 }] } },
-    { field_name: "口径", type: FT.TEXT },
-    { field_name: "排序", type: FT.NUMBER },
-    { field_name: "花费", type: FT.NUMBER },
-    { field_name: "注册人数", type: FT.NUMBER },
-    { field_name: "注册单价", type: FT.NUMBER },
-    { field_name: "首提人数", type: FT.NUMBER },
-    { field_name: "首提单价", type: FT.NUMBER },
-    { field_name: "IG授权人数", type: FT.NUMBER },
-    { field_name: "IG授权单价", type: FT.NUMBER },
-    { field_name: "成材人数", type: FT.NUMBER },
-    { field_name: "成材单价", type: FT.NUMBER },
-  ],
-  sql: (from, to) => {
-    // 花费：本渠道账户集 ∩ channel=ch.channel；人数：非公会 且 source=ch.src。周期：今日锚 to、近N日锚 to-1(昨天)。
-    const ppl = (stage) =>
-      `(SELECT COALESCE(SUM(count),0) FROM funnel_daily
-        WHERE date > $2::date - pr.ao - pr.days AND date <= $2::date - pr.ao AND stage_key='${stage}'
-          AND source = ch.src)`;
-    return {
-      text: `
-        SELECT ch.label AS channel, pr.label AS caliber, (ch.so*100 + pr.ord) AS ord,
-          (SELECT COALESCE(SUM(cost),0)::float8 FROM campaign_daily
-           WHERE account_id = ANY($1) AND channel = ch.channel
-             AND date > $2::date - pr.ao - pr.days AND date <= $2::date - pr.ao) AS cost,
-          ${ppl(AIGUILD_STAGES.reg)} AS reg,
-          ${ppl(AIGUILD_STAGES.wd)}  AS wd,
-          ${ppl(AIGUILD_STAGES.ig)}  AS ig,
-          ${ppl(AIGUILD_STAGES.cc)}  AS cc
-        FROM (VALUES ('Facebook','facebook','fb',0),('TikTok','tiktok','tt',1),('Google','google','google',2)) ch(label,channel,src,so)
-        CROSS JOIN (VALUES (0::int,0::int,1::int,'今日'),(1,1,1,'近1日'),(7,1,7,'近7日'),(14,1,14,'近14日'),(30,1,30,'近30日')) pr(ord,ao,days,label)
-        ORDER BY ord`,
-      params: [accounts, to],
-    };
-  },
-  toFields: (r) => {
-    const cost = num(r.cost), reg = num(r.reg), wd = num(r.wd), ig = num(r.ig), cc = num(r.cc);
-    const f = { 渠道: r.channel, 口径: r.caliber, 排序: num(r.ord), 花费: cost, 注册人数: reg, 首提人数: wd, IG授权人数: ig, 成材人数: cc };
-    const rp = price(cost, reg), wp = price(cost, wd), ip = price(cost, ig), cp = price(cost, cc);
-    if (rp !== undefined) f.注册单价 = rp;
-    if (wp !== undefined) f.首提单价 = wp;
-    if (ip !== undefined) f.IG授权单价 = ip;
-    if (cp !== undefined) f.成材单价 = cp;
-    return f;
-  },
-});
 const retentionTable = (key, name, category) => ({
   key, name, windowed: false,
   fields: [
@@ -712,7 +665,6 @@ export async function buildTables() {
     ...g.pwaAccounts.map((a) => pwaAccountTable(a.name, a.id)),
     pwaDailyTable(pwaAccIds),
     pwaSummaryTable(pwaAccIds),
-    pwaChannelSummaryTable(pwaAccIds),
     retentionUser,
     retentionChengcai,
   ];
