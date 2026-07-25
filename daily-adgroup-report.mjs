@@ -1,7 +1,8 @@
 // PWA 广告组日报 + 优化建议。每天 9:15(UTC+8) 跑一次：
 //   取「前一天」活跃 PWA 账户(lib/pwa-accounts)的每个在跑广告组 → 昨日花费/CTR/CPC + 近3日窗口
 //   → 规则化优化建议(放量/维持/砍预算/暂停/测试观察) + 每组「可加量素材」(据 ad_daily 素材级 CTR/CPC)
-//   → 写 Postgres adgroup_daily_report(累积) → 追加到飞书表「PWA广告组日报与优化」(按日期幂等：先删当日行再插)。
+//   → 写 Postgres adgroup_daily_report(累积历史) → 全量刷新飞书表「PWA广告组日报与优化」(清空整表只留目标日)。
+// 飞书表只呈现「目标日」单日 → 每个广告组只出现一次，避免跨日出现互相矛盾的建议；历史回溯查 Postgres。
 //
 // 注册无法归因到广告组/素材(BytePlus 只到 source 级)，故广告组与素材层都只看点击经济性(CTR/CPC)；
 // 当日大盘单价(活跃账户 fb-CPA)作为上下文列放每行。活跃账户集见 lib/pwa-accounts.mjs。
@@ -9,7 +10,7 @@
 import { query, withTx, bulkInsert, end } from "./lib/db.mjs";
 import {
   listTables, createTable, tableIdMap, batchCreate, batchDelete,
-  searchRecordIdsByDateNum, listFields, createField, FT, dateMs, dateNum,
+  listAllRecordIds, listFields, createField, FT, dateMs, dateNum,
 } from "./lib/feishu.mjs";
 import { FEISHU } from "./config.mjs";
 import { ACTIVE_PWA_ACCOUNTS as ACCOUNTS, ACTIVE_PWA_ACCOUNT_IDS as ACCOUNT_IDS } from "./lib/pwa-accounts.mjs";
@@ -251,11 +252,12 @@ async function ensureFeishuTable() {
 async function writeFeishu(target, rows) {
   if (!FEISHU.appToken) { console.log("  ⏭ 未配置 FEISHU_APP_TOKEN，跳过飞书写入。"); return; }
   const tableId = await ensureFeishuTable();
-  const n = dateNum(target);
-  const old = await searchRecordIdsByDateNum(tableId, "date_num", n, n); // 只删当日行，保留历史与人工批注
+  // 只呈现目标日：全量清空整表再写当日 → 每个广告组只出现一次，不会跨日给出互相矛盾的建议。
+  // （历史留在 Postgres adgroup_daily_report，需要回溯查库即可。）
+  const old = await listAllRecordIds(tableId);
   const del = await batchDelete(tableId, old);
   const created = await batchCreate(tableId, rows.map(toFeishu));
-  console.log(`  ✅ 飞书「${FEISHU_TABLE}」：删当日 ${del} · 写 ${created}`);
+  console.log(`  ✅ 飞书「${FEISHU_TABLE}」：清 ${del} · 写 ${created}（仅当日 ${target}）`);
 }
 
 async function main() {
