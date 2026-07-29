@@ -222,3 +222,61 @@ CREATE TABLE IF NOT EXISTS aiguild_os_daily (
   PRIMARY KEY (date, stage_key, os)
 );
 CREATE INDEX IF NOT EXISTS aiguild_os_daily_date_idx ON aiguild_os_daily (date);
+
+
+-- ========== af_events：AppsFlyer Push API 实时原始事件（上架包/Google 投放，BytePlus 打点覆盖不到）==========
+-- 由 app/api/af/push/route.ts 接收 AF Push API v2 的 POST/GET 写入，一条消息一行。
+-- 设计要点（受 AF 协议约束）：
+--   · AF 4 秒超时 → 只做一条 INSERT，不做任何派生计算；聚合放查询层。
+--   · AF 空字段不发 → 所有列可空，除 raw/dedupe_key。
+--   · AF 只在 5xx 时重试(15 分钟间隔×4)，且重发的是同一条报文 → dedupe_key = md5(整包 JSON)，
+--     唯一索引 + ON CONFLICT DO NOTHING 天然幂等；重放不会产生重复行。
+--   · 热字段拉平成列供查询/聚合，其余 100+ 字段全量留在 raw 里，不怕 AF 以后加字段。
+CREATE TABLE IF NOT EXISTS af_events (
+  id            bigserial     PRIMARY KEY,
+  dedupe_key    text          NOT NULL,            -- md5(raw)，AF 重试幂等用
+  received_at   timestamptz   NOT NULL DEFAULT now(),
+  event_time    timestamptz,                       -- AF event_time（UTC，无时区后缀，按 UTC 解析）
+  event_name    text,                              -- install / af_purchase / 自定义应用内事件名
+  event_source  text,                              -- SDK / S2S
+  appsflyer_id  text,                              -- AF 设备唯一 id
+  customer_user_id text,                           -- CUID：自有用户 id，跨系统 join 的钥匙
+  app_id        text,                              -- com.xxx（安卓）/ idNNNN（iOS）
+  platform      text,                              -- android / ios
+  media_source  text,                              -- googleadwords_int / Facebook Ads / bytedanceglobal_int …
+  channel       text,                              -- af_channel
+  campaign      text,
+  campaign_id   text,                              -- af_c_id
+  adset         text,                              -- af_adset
+  adset_id      text,                              -- af_adset_id
+  ad            text,                              -- af_ad
+  ad_id         text,                              -- af_ad_id
+  site_id       text,                              -- af_siteid（子渠道/发布商）
+  is_retargeting boolean,
+  attributed_touch_type text,                      -- click / impression
+  install_time  timestamptz,
+  country_code  text,
+  city          text,
+  ip            text,
+  language      text,
+  device_type   text,
+  os_version    text,
+  app_version   text,
+  sdk_version   text,
+  advertising_id text,                             -- GAID（安卓）
+  idfa          text,                              -- iOS
+  idfv          text,
+  android_id    text,
+  oaid          text,
+  event_revenue        numeric(18,4),
+  event_revenue_usd    numeric(18,4),
+  event_revenue_currency text,
+  event_value   jsonb,                             -- 应用内事件参数（AF 发的是 JSON 字符串，这里尽量解成 jsonb）
+  raw           jsonb         NOT NULL,            -- 整包原始报文，字段增改不丢数据
+  CONSTRAINT af_events_dedupe_uniq UNIQUE (dedupe_key)
+);
+CREATE INDEX IF NOT EXISTS af_events_event_time_idx   ON af_events (event_time DESC);
+CREATE INDEX IF NOT EXISTS af_events_name_time_idx    ON af_events (event_name, event_time DESC);
+CREATE INDEX IF NOT EXISTS af_events_media_time_idx   ON af_events (media_source, event_time DESC);
+CREATE INDEX IF NOT EXISTS af_events_received_idx     ON af_events (received_at DESC);
+CREATE INDEX IF NOT EXISTS af_events_cuid_idx         ON af_events (customer_user_id) WHERE customer_user_id IS NOT NULL;
