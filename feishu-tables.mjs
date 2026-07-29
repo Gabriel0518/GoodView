@@ -462,7 +462,11 @@ const APP_ACCOUNT_IDS = APP_ACCOUNTS.map((a) => a.id);
 //   花费 = campaign_daily 上架包账户 按 channel（XMP）
 //   人数 = af_events join af_event_map（AF Push 实时推来的原始事件），只统计 enabled 的阶段
 //          当前启用：安装(install) / 注册(af_login_success)；IG授权(af_complete_ins_task) 暂不同步
-//   ⚠️ 人数按「设备数」(distinct appsflyer_id) 而非事件次数——注册类事件同一设备可重复触发。
+//   ⚠️ 人数按「设备数」而非事件次数——注册类事件同一设备可重复触发。
+//      设备标识用回退链 appsflyer_id → advertising_id(GAID) → idfa → android_id → dedupe_key：
+//      appsflyer_id 在 AF 的 Push API 里是**可选字段**，没勾就不发（2026-07-29 实测就没发，
+//      只发了 advertising_id）。写死用 appsflyer_id 会让人数恒为 0，故必须回退。
+//      最后兜底 dedupe_key = 每行算一个，宁可退化成事件次数，也不要静默变 0。
 //   ⚠️ AF 的 event_time 是 UTC，这里转 Asia/Shanghai 取业务日，与 XMP 花费/BytePlus 漏斗的日期口径对齐。
 const appDailyTable = () => ({
   key: "app_daily",
@@ -497,8 +501,10 @@ const appDailyTable = () => ({
             WHEN e.media_source IS NULL OR e.media_source IN ('organic','Organic')  THEN '自然量'
             ELSE '其他'
           END AS label,
-          COUNT(DISTINCT e.appsflyer_id) FILTER (WHERE m.stage_key = 'app_install')  AS installs,
-          COUNT(DISTINCT e.appsflyer_id) FILTER (WHERE m.stage_key = 'app_register') AS regs
+          COUNT(DISTINCT COALESCE(e.appsflyer_id, e.advertising_id, e.idfa, e.android_id, e.dedupe_key))
+            FILTER (WHERE m.stage_key = 'app_install')  AS installs,
+          COUNT(DISTINCT COALESCE(e.appsflyer_id, e.advertising_id, e.idfa, e.android_id, e.dedupe_key))
+            FILTER (WHERE m.stage_key = 'app_register') AS regs
         FROM af_events e
         JOIN af_event_map m ON m.af_event_name = e.event_name AND m.enabled
         WHERE (e.event_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date BETWEEN $1 AND $2

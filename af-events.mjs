@@ -15,7 +15,8 @@ async function list() {
   const { rows } = await query(`
     SELECT e.event_name,
            count(*)                          AS events,
-           count(DISTINCT e.appsflyer_id)    AS devices,
+           -- appsflyer_id 是 AF 可选字段，没勾就不发 → 回退到 GAID/IDFA/android_id 认设备
+           count(DISTINCT COALESCE(e.appsflyer_id, e.advertising_id, e.idfa, e.android_id)) AS devices,
            min(e.event_time)                 AS first_seen,
            max(e.event_time)                 AS last_seen,
            count(*) FILTER (WHERE e.customer_user_id IS NOT NULL) AS with_cuid,
