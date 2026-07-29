@@ -464,15 +464,10 @@ const APP_ACCOUNT_IDS = APP_ACCOUNTS.map((a) => a.id);
 //            为什么不用 AF 的 install 事件：AF Push 只能从开通那刻往后收、不补历史，且依赖 app 埋点；
 //            XMP 的 conversion 是媒体自己回传的，有完整历史、与花费同源同日期口径，做单价更稳。
 //            （MMP 口径的 mobile_app_install/active_register/af_conversion 对这些账户实测全为 0，用不了。）
-//   注册数 = af_events 的 af_login_success（AF Push）→ 注册单价 = 花费/注册数
-//   ⚠️ 两个分子来源不同：安装来自媒体回传、注册来自 app 埋点，跨源不可做「注册/安装」转化率
-//      （媒体的转化口径不一定等于一次真实安装）。要看转化率得等 AF 的 install 事件积累。
-//   ⚠️ 人数按「设备数」而非事件次数——注册类事件同一设备可重复触发。
-//      设备标识用回退链 appsflyer_id → advertising_id(GAID) → idfa → android_id → dedupe_key：
-//      appsflyer_id 在 AF 的 Push API 里是**可选字段**，没勾就不发（2026-07-29 实测就没发，
-//      只发了 advertising_id）。写死用 appsflyer_id 会让人数恒为 0，故必须回退。
-//      最后兜底 dedupe_key = 每行算一个，宁可退化成事件次数，也不要静默变 0。
-//   ⚠️ AF 的 event_time 是 UTC，这里转 Asia/Shanghai 取业务日，与 XMP 花费/BytePlus 漏斗的日期口径对齐。
+//   2026-07-29 用户确认：app 侧打点尚不全 → 本表**只统计安装量**，注册列先撤。
+//   （挂着恒为 0 的注册列会被误读成「没人注册」，而真实原因是打点没到，比没有这列更糟。）
+//   af_events 仍在持续收全部 AF 事件、一条不丢；打点补全后把 af_event_map 里的
+//   af_login_success 置回 enabled、加回两列即可，历史数据不会缺。
 const appDailyTable = () => ({
   key: "app_daily",
   name: "上架包渠道日报",
@@ -486,8 +481,6 @@ const appDailyTable = () => ({
     { field_name: "花费", type: FT.NUMBER },
     { field_name: "安装数", type: FT.NUMBER },
     { field_name: "安装单价", type: FT.NUMBER },
-    { field_name: "注册数", type: FT.NUMBER },
-    { field_name: "注册单价", type: FT.NUMBER },
   ],
   sql: (from, to) => ({
     text: `
@@ -504,44 +497,24 @@ const appDailyTable = () => ({
                 AND c.campaign_id = mm.campaign_id AND c.adset_id = mm.adset_id
                WHERE mm.metric_key = 'conversion' AND mm.account_id = ANY($3)
                  AND mm.date BETWEEN $1 AND $2
-               GROUP BY c.date, c.channel),
-      ppl AS (
-        -- AF 的 media_source 各媒体写法不一（googleadwords_int / Facebook Ads / bytedanceglobal_int …）
-        -- 且会随 AF 版本变，故用模糊匹配而不是等值枚举，避免改名就漏数。
-        SELECT (e.event_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date AS date,
-          CASE
-            WHEN e.media_source ILIKE '%google%'                                    THEN 'Google'
-            WHEN e.media_source ILIKE '%facebook%' OR e.media_source ILIKE '%meta%' THEN 'Facebook'
-            WHEN e.media_source ILIKE '%tiktok%'  OR e.media_source ILIKE '%bytedance%' THEN 'TikTok'
-            WHEN e.media_source IS NULL OR e.media_source IN ('organic','Organic')  THEN '自然量'
-            ELSE '其他'
-          END AS label,
-          COUNT(DISTINCT COALESCE(e.appsflyer_id, e.advertising_id, e.idfa, e.android_id, e.dedupe_key))
-            FILTER (WHERE m.stage_key = 'app_register') AS regs
-        FROM af_events e
-        JOIN af_event_map m ON m.af_event_name = e.event_name AND m.enabled
-        WHERE (e.event_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date BETWEEN $1 AND $2
-          AND m.stage_key = 'app_register'
-        GROUP BY 1, 2)
+               GROUP BY c.date, c.channel)
       SELECT to_char(d.date,'YYYY-MM-DD') date, ch.label channel, ch.so so, COALESCE(s.cost,0) cost,
-             COALESCE(i.conv,0) installs, COALESCE(p.regs,0) regs
+             COALESCE(i.conv,0) installs
       FROM d CROSS JOIN ch
       LEFT JOIN spend s ON s.date=d.date AND s.channel=ch.channel
       LEFT JOIN inst  i ON i.date=d.date AND i.channel=ch.channel
-      LEFT JOIN ppl   p ON p.date=d.date AND p.label=ch.label
-      WHERE COALESCE(s.cost,0)>0 OR COALESCE(i.conv,0)>0 OR COALESCE(p.regs,0)>0
+      WHERE COALESCE(s.cost,0)>0 OR COALESCE(i.conv,0)>0
       ORDER BY d.date DESC, ch.so`,
     params: [from, to, APP_ACCOUNT_IDS],
   }),
   toFields: (r) => {
-    const cost = num(r.cost), inst = num(r.installs), reg = num(r.regs);
+    const cost = num(r.cost), inst = num(r.installs);
     const f = { 标识: `${r.date}|${r.channel}`, 日期: dateMs(r.date), date_num: dateNum(r.date),
-      渠道: r.channel, 渠道名称: r.channel, 花费: cost, 安装数: inst, 注册数: reg };
+      渠道: r.channel, 渠道名称: r.channel, 花费: cost, 安装数: inst };
     // 单价仅在有花费时给出；自然量行无花费(0) → 留空，避免 $0 误导（与 PWA 表同款处理）。
     if (cost > 0) {
-      const ip = price(cost, inst), rp = price(cost, reg);
+      const ip = price(cost, inst);
       if (ip !== undefined) f.安装单价 = ip;
-      if (rp !== undefined) f.注册单价 = rp;
     }
     return f;
   },
