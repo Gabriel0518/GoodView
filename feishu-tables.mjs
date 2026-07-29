@@ -459,9 +459,14 @@ const APP_ACCOUNTS = [
 const APP_ACCOUNT_IDS = APP_ACCOUNTS.map((a) => a.id);
 
 // 上架包渠道日报（date × 渠道，结构对齐 PWA渠道日报，便于两个产品横向对比）：
-//   花费 = campaign_daily 上架包账户 按 channel（XMP）
-//   人数 = af_events join af_event_map（AF Push 实时推来的原始事件），只统计 enabled 的阶段
-//          当前启用：安装(install) / 注册(af_login_success)；IG授权(af_complete_ins_task) 暂不同步
+//   花费   = campaign_daily 上架包账户 按 channel（XMP）
+//   安装数 = campaign_metric_daily 的 conversion（XMP 转化数，媒体侧回传口径）→ 安装单价 = 花费/转化数
+//            为什么不用 AF 的 install 事件：AF Push 只能从开通那刻往后收、不补历史，且依赖 app 埋点；
+//            XMP 的 conversion 是媒体自己回传的，有完整历史、与花费同源同日期口径，做单价更稳。
+//            （MMP 口径的 mobile_app_install/active_register/af_conversion 对这些账户实测全为 0，用不了。）
+//   注册数 = af_events 的 af_login_success（AF Push）→ 注册单价 = 花费/注册数
+//   ⚠️ 两个分子来源不同：安装来自媒体回传、注册来自 app 埋点，跨源不可做「注册/安装」转化率
+//      （媒体的转化口径不一定等于一次真实安装）。要看转化率得等 AF 的 install 事件积累。
 //   ⚠️ 人数按「设备数」而非事件次数——注册类事件同一设备可重复触发。
 //      设备标识用回退链 appsflyer_id → advertising_id(GAID) → idfa → android_id → dedupe_key：
 //      appsflyer_id 在 AF 的 Push API 里是**可选字段**，没勾就不发（2026-07-29 实测就没发，
@@ -490,6 +495,16 @@ const appDailyTable = () => ({
       ch(label,channel,so) AS (VALUES ('Facebook','facebook',0),('TikTok','tiktok',1),('Google','google',2),('自然量','',3),('其他','',4)),
       spend AS (SELECT date, channel, SUM(cost)::float8 cost FROM campaign_daily
                 WHERE account_id = ANY($3) AND date BETWEEN $1 AND $2 GROUP BY date, channel),
+      -- 安装数 = XMP 转化数。conversion 落在扩展指标长表，按 (date,account,campaign,adset) 与 campaign_daily
+      -- 对齐；长表本身不存 channel，故 join 回宽表取渠道。
+      inst AS (SELECT c.date, c.channel, SUM(mm.value)::float8 conv
+               FROM campaign_metric_daily mm
+               JOIN campaign_daily c
+                 ON c.date = mm.date AND c.account_id = mm.account_id
+                AND c.campaign_id = mm.campaign_id AND c.adset_id = mm.adset_id
+               WHERE mm.metric_key = 'conversion' AND mm.account_id = ANY($3)
+                 AND mm.date BETWEEN $1 AND $2
+               GROUP BY c.date, c.channel),
       ppl AS (
         -- AF 的 media_source 各媒体写法不一（googleadwords_int / Facebook Ads / bytedanceglobal_int …）
         -- 且会随 AF 版本变，故用模糊匹配而不是等值枚举，避免改名就漏数。
@@ -502,19 +517,19 @@ const appDailyTable = () => ({
             ELSE '其他'
           END AS label,
           COUNT(DISTINCT COALESCE(e.appsflyer_id, e.advertising_id, e.idfa, e.android_id, e.dedupe_key))
-            FILTER (WHERE m.stage_key = 'app_install')  AS installs,
-          COUNT(DISTINCT COALESCE(e.appsflyer_id, e.advertising_id, e.idfa, e.android_id, e.dedupe_key))
             FILTER (WHERE m.stage_key = 'app_register') AS regs
         FROM af_events e
         JOIN af_event_map m ON m.af_event_name = e.event_name AND m.enabled
         WHERE (e.event_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date BETWEEN $1 AND $2
+          AND m.stage_key = 'app_register'
         GROUP BY 1, 2)
       SELECT to_char(d.date,'YYYY-MM-DD') date, ch.label channel, ch.so so, COALESCE(s.cost,0) cost,
-             COALESCE(p.installs,0) installs, COALESCE(p.regs,0) regs
+             COALESCE(i.conv,0) installs, COALESCE(p.regs,0) regs
       FROM d CROSS JOIN ch
       LEFT JOIN spend s ON s.date=d.date AND s.channel=ch.channel
+      LEFT JOIN inst  i ON i.date=d.date AND i.channel=ch.channel
       LEFT JOIN ppl   p ON p.date=d.date AND p.label=ch.label
-      WHERE COALESCE(s.cost,0)>0 OR COALESCE(p.installs,0)>0 OR COALESCE(p.regs,0)>0
+      WHERE COALESCE(s.cost,0)>0 OR COALESCE(i.conv,0)>0 OR COALESCE(p.regs,0)>0
       ORDER BY d.date DESC, ch.so`,
     params: [from, to, APP_ACCOUNT_IDS],
   }),
