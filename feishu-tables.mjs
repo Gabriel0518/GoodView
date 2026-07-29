@@ -444,9 +444,10 @@ const pwaAccountTable = (name, accId) => ({
   }),
 });
 
-// PWA渠道日报（date × 渠道 facebook/tiktok/google，按日分渠道看）：
-//   花费按 campaign_daily.channel、人数按 funnel source（渠道↔source：facebook↔fb、tiktok↔tt、google↔google）。
-//   ⚠️ unknown/bff 归不到渠道，故三渠道之和 < 大盘总注册（打点现实，本表只看三渠道）。
+// PWA渠道日报（date × 渠道 Facebook/TikTok/Google/Bff/其他，按日分渠道看）：
+//   花费按 campaign_daily.channel、人数按 funnel source（渠道↔source：facebook↔fb、tiktok↔tt、google↔google、Bff↔bff）。
+//   Bff 无广告账户 → 花费恒 0、单价留空（自然量渠道，只看人数）；「其他」= 归不到上述来源的（主要是 unknown）。
+//   ⚠️ AI公会不进本表（source 三桶被排除，花费另在「AI公会转化观测」看板算），故渠道之和 = 大盘非公会总量。
 const pwaDailyTable = (accounts) => ({
   key: "pwa_daily",
   name: "PWA渠道日报",
@@ -455,7 +456,9 @@ const pwaDailyTable = (accounts) => ({
     { field_name: "标识", type: FT.TEXT },
     { field_name: "日期", type: FT.DATE },
     { field_name: "date_num", type: FT.NUMBER },
-    { field_name: "渠道", type: FT.SINGLE_SELECT, property: { options: [{ name: "Facebook", color: 1 }, { name: "TikTok", color: 3 }, { name: "Google", color: 5 }, { name: "其他", color: 7 }] } },
+    { field_name: "渠道", type: FT.SINGLE_SELECT, property: { options: [{ name: "Facebook", color: 1 }, { name: "TikTok", color: 3 }, { name: "Google", color: 5 }, { name: "Bff", color: 6 }, { name: "其他", color: 7 }] } },
+    // 渠道名称：与「渠道」同值的纯文本镜像（单选在公式/文本维度场景不好用，这里给一份可直接引用的文本）。
+    { field_name: "渠道名称", type: FT.TEXT },
     { field_name: "花费", type: FT.NUMBER },
     { field_name: "注册人数", type: FT.NUMBER },
     { field_name: "注册单价", type: FT.NUMBER },
@@ -469,14 +472,15 @@ const pwaDailyTable = (accounts) => ({
   sql: (from, to) => ({
     text: `
       WITH d AS (SELECT generate_series($1::date,$2::date,'1 day')::date date),
-      ch(label,channel,so) AS (VALUES ('Facebook','facebook',0),('TikTok','tiktok',1),('Google','google',2),('其他','',3)),
+      ch(label,channel,so) AS (VALUES ('Facebook','facebook',0),('TikTok','tiktok',1),('Google','google',2),('Bff','',3),('其他','',4)),
       spend AS (SELECT date, channel, SUM(cost)::float8 cost FROM campaign_daily
                 WHERE account_id = ANY($3) AND date BETWEEN $1 AND $2 GROUP BY date, channel),
       ppl AS (
-        -- 人数按 funnel source 归到渠道；非公会里归不到 fb/tt/google 的（bff/unknown 等）落「其他」，
+        -- 人数按 funnel source 归到渠道；非公会里归不到 fb/tt/google/bff 的（unknown 等）落「其他」，
         -- 保证渠道之和 = 大盘非公会总量（此前只 join fb/tt/google，丢了 bff+unknown 约半数）。
         SELECT date,
-          CASE source WHEN 'fb' THEN 'Facebook' WHEN 'tt' THEN 'TikTok' WHEN 'google' THEN 'Google' ELSE '其他' END AS label,
+          CASE source WHEN 'fb' THEN 'Facebook' WHEN 'tt' THEN 'TikTok' WHEN 'google' THEN 'Google'
+                      WHEN 'bff' THEN 'Bff' ELSE '其他' END AS label,
           SUM(count) FILTER (WHERE stage_key=$4) reg,
           SUM(count) FILTER (WHERE stage_key=$5) wd,
           SUM(count) FILTER (WHERE stage_key=$6) ig,
@@ -497,9 +501,9 @@ const pwaDailyTable = (accounts) => ({
   }),
   toFields: (r) => {
     const cost = num(r.cost), reg = num(r.reg), wd = num(r.wd), ig = num(r.ig), cc = num(r.cc);
-    const f = { 标识: `${r.date}|${r.channel}`, 日期: dateMs(r.date), date_num: dateNum(r.date), 渠道: r.channel,
+    const f = { 标识: `${r.date}|${r.channel}`, 日期: dateMs(r.date), date_num: dateNum(r.date), 渠道: r.channel, 渠道名称: r.channel,
       花费: cost, 注册人数: reg, 首提人数: wd, IG授权人数: ig, 成材人数: cc };
-    // 单价仅在有花费时给出；「其他」行无广告花费(0) → 单价留空，避免 $0 误导。
+    // 单价仅在有花费时给出；Bff/「其他」行无广告花费(0) → 单价留空，避免 $0 误导。
     if (cost > 0) {
       const rp = price(cost, reg), wp = price(cost, wd), ip = price(cost, ig), cp = price(cost, cc);
       if (rp !== undefined) f.注册单价 = rp;
