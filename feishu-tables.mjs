@@ -444,6 +444,88 @@ const pwaAccountTable = (name, accId) => ({
   }),
 });
 
+// ===== 上架包（SmartReply APP）=====
+// 与 PWA 是两个产品：投的是应用商店安装包，转化走 AppsFlyer（af_events），不在 BytePlus 的 PWA 应用里。
+// 所以这些账户的花费**必须**从 PWA 看板剔除——否则分母有花费、分子永远没转化，会把 PWA 单价整体抬高
+// （2026-07-29 发现时已污染 4 天、$942：Google $483 + TikTok $381 + Facebook $78，且不止 Google 行，
+//  TikTok/Facebook 行也被抬高）。剔除逻辑见 resolveDerivedGroups，与「公会账户自动排除」同款。
+// 加/减上架包账户改这里一处：既决定「上架包渠道日报」算谁，也决定从 PWA 看板剔除谁。
+// 已核对（2026-07-29）：三个账户各只有一条 SmartReply 系列，无 PWA 系列混投，可整账户切走。
+const APP_ACCOUNTS = [
+  { id: "6245583421",          name: "AI Fantasy-T8088",   channel: "google" },   // SR_android_wcx_install_0724_gg
+  { id: "7665547836257058834", name: "省广_SR_and_1-5D80", channel: "tiktok" },   // Smart Reply-test
+  { id: "27589868840681799",   name: "省广_SR_and_5_wcx",  channel: "facebook" }, // Smart Reply_android_wcx_install_0725
+];
+const APP_ACCOUNT_IDS = APP_ACCOUNTS.map((a) => a.id);
+
+// 上架包渠道日报（date × 渠道，结构对齐 PWA渠道日报，便于两个产品横向对比）：
+//   花费 = campaign_daily 上架包账户 按 channel（XMP）
+//   人数 = af_events join af_event_map（AF Push 实时推来的原始事件），只统计 enabled 的阶段
+//          当前启用：安装(install) / 注册(af_login_success)；IG授权(af_complete_ins_task) 暂不同步
+//   ⚠️ 人数按「设备数」(distinct appsflyer_id) 而非事件次数——注册类事件同一设备可重复触发。
+//   ⚠️ AF 的 event_time 是 UTC，这里转 Asia/Shanghai 取业务日，与 XMP 花费/BytePlus 漏斗的日期口径对齐。
+const appDailyTable = () => ({
+  key: "app_daily",
+  name: "上架包渠道日报",
+  windowed: true,
+  fields: [
+    { field_name: "标识", type: FT.TEXT },
+    { field_name: "日期", type: FT.DATE },
+    { field_name: "date_num", type: FT.NUMBER },
+    { field_name: "渠道", type: FT.SINGLE_SELECT, property: { options: [{ name: "Facebook", color: 1 }, { name: "TikTok", color: 3 }, { name: "Google", color: 5 }, { name: "自然量", color: 6 }, { name: "其他", color: 7 }] } },
+    { field_name: "渠道名称", type: FT.TEXT },
+    { field_name: "花费", type: FT.NUMBER },
+    { field_name: "安装数", type: FT.NUMBER },
+    { field_name: "安装单价", type: FT.NUMBER },
+    { field_name: "注册数", type: FT.NUMBER },
+    { field_name: "注册单价", type: FT.NUMBER },
+  ],
+  sql: (from, to) => ({
+    text: `
+      WITH d AS (SELECT generate_series($1::date,$2::date,'1 day')::date date),
+      ch(label,channel,so) AS (VALUES ('Facebook','facebook',0),('TikTok','tiktok',1),('Google','google',2),('自然量','',3),('其他','',4)),
+      spend AS (SELECT date, channel, SUM(cost)::float8 cost FROM campaign_daily
+                WHERE account_id = ANY($3) AND date BETWEEN $1 AND $2 GROUP BY date, channel),
+      ppl AS (
+        -- AF 的 media_source 各媒体写法不一（googleadwords_int / Facebook Ads / bytedanceglobal_int …）
+        -- 且会随 AF 版本变，故用模糊匹配而不是等值枚举，避免改名就漏数。
+        SELECT (e.event_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date AS date,
+          CASE
+            WHEN e.media_source ILIKE '%google%'                                    THEN 'Google'
+            WHEN e.media_source ILIKE '%facebook%' OR e.media_source ILIKE '%meta%' THEN 'Facebook'
+            WHEN e.media_source ILIKE '%tiktok%'  OR e.media_source ILIKE '%bytedance%' THEN 'TikTok'
+            WHEN e.media_source IS NULL OR e.media_source IN ('organic','Organic')  THEN '自然量'
+            ELSE '其他'
+          END AS label,
+          COUNT(DISTINCT e.appsflyer_id) FILTER (WHERE m.stage_key = 'app_install')  AS installs,
+          COUNT(DISTINCT e.appsflyer_id) FILTER (WHERE m.stage_key = 'app_register') AS regs
+        FROM af_events e
+        JOIN af_event_map m ON m.af_event_name = e.event_name AND m.enabled
+        WHERE (e.event_time AT TIME ZONE 'UTC' AT TIME ZONE 'Asia/Shanghai')::date BETWEEN $1 AND $2
+        GROUP BY 1, 2)
+      SELECT to_char(d.date,'YYYY-MM-DD') date, ch.label channel, ch.so so, COALESCE(s.cost,0) cost,
+             COALESCE(p.installs,0) installs, COALESCE(p.regs,0) regs
+      FROM d CROSS JOIN ch
+      LEFT JOIN spend s ON s.date=d.date AND s.channel=ch.channel
+      LEFT JOIN ppl   p ON p.date=d.date AND p.label=ch.label
+      WHERE COALESCE(s.cost,0)>0 OR COALESCE(p.installs,0)>0 OR COALESCE(p.regs,0)>0
+      ORDER BY d.date DESC, ch.so`,
+    params: [from, to, APP_ACCOUNT_IDS],
+  }),
+  toFields: (r) => {
+    const cost = num(r.cost), inst = num(r.installs), reg = num(r.regs);
+    const f = { 标识: `${r.date}|${r.channel}`, 日期: dateMs(r.date), date_num: dateNum(r.date),
+      渠道: r.channel, 渠道名称: r.channel, 花费: cost, 安装数: inst, 注册数: reg };
+    // 单价仅在有花费时给出；自然量行无花费(0) → 留空，避免 $0 误导（与 PWA 表同款处理）。
+    if (cost > 0) {
+      const ip = price(cost, inst), rp = price(cost, reg);
+      if (ip !== undefined) f.安装单价 = ip;
+      if (rp !== undefined) f.注册单价 = rp;
+    }
+    return f;
+  },
+});
+
 // PWA渠道日报（date × 渠道 Facebook/TikTok/Google/Bff/其他，按日分渠道看）：
 //   花费按 campaign_daily.channel、人数按 funnel source（渠道↔source：facebook↔fb、tiktok↔tt、google↔google、Bff↔bff）。
 //   Bff 无广告账户 → 花费恒 0、单价留空（自然量渠道，只看人数）；「其他」= 归不到上述来源的（主要是 unknown）。
@@ -646,7 +728,9 @@ async function resolveDerivedGroups() {
         if (nameById.has(r.value)) { id = r.value; nm = nameById.get(r.value); }
         else if (idByName.has(r.value)) { id = idByName.get(r.value); nm = r.value; }
         else continue;                        // 填的值在库里查无此账户 → 跳过（无数据可展示）
-        if (guildAccIds.has(id)) continue;    // 排除公会账户（花费归公会看板）
+        if (guildAccIds.has(id)) continue;     // 排除公会账户（花费归公会看板）
+        if (APP_ACCOUNT_IDS.includes(id)) continue; // 排除上架包账户（花费归「上架包渠道日报」；
+                                               // 它们的转化在 AF 不在 BytePlus，留在这儿会永远是「有花费零转化」）
         if (!spendById.has(id)) continue;     // 排除近 60 天零花费账户（免建空的账户系列表）
         if (seen.has(id)) continue;
         seen.add(id);
@@ -676,6 +760,7 @@ export async function buildTables() {
     ...g.pwaAccounts.map((a) => pwaAccountTable(a.name, a.id)),
     pwaDailyTable(pwaAccIds),
     pwaSummaryTable(pwaAccIds),
+    appDailyTable(),
     retentionUser,
     retentionChengcai,
   ];
