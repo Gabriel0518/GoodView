@@ -280,3 +280,20 @@ CREATE INDEX IF NOT EXISTS af_events_name_time_idx    ON af_events (event_name, 
 CREATE INDEX IF NOT EXISTS af_events_media_time_idx   ON af_events (media_source, event_time DESC);
 CREATE INDEX IF NOT EXISTS af_events_received_idx     ON af_events (received_at DESC);
 CREATE INDEX IF NOT EXISTS af_events_cuid_idx         ON af_events (customer_user_id) WHERE customer_user_id IS NOT NULL;
+
+
+-- ========== af_event_map：AF 事件名 → 业务阶段 映射（上架包漏斗的口径定义）==========
+-- 为什么要这张表：AF 的 event_name 由 app 埋点决定，只有 install 是 AF 协议固定的标准事件，
+-- 其余（注册/IG授权/…）各 app 各叫各的，且以后还会加。把映射放进 DB 而不是写死在代码里，
+-- 加事件只改数据、不用改码部署。af_events 原始事件 join 本表即得分阶段人数。
+-- stage_key 尽量与 funnel_stage_meta（BytePlus/PWA 侧）同名，方便两条链路的同口径对比。
+CREATE TABLE IF NOT EXISTS af_event_map (
+  af_event_name text        PRIMARY KEY,        -- AF 报文里的 event_name 原值
+  stage_key     text        NOT NULL,           -- 业务阶段：app_install / cash_ready_show / task_ins_bind …
+  label         text        NOT NULL,           -- 中文名：安装 / 注册 / IG授权完成
+  ord           int         NOT NULL DEFAULT 0, -- 漏斗顺序
+  enabled       boolean     NOT NULL DEFAULT true,
+  note          text,                           -- 口径备注/待确认标记
+  updated_at    timestamptz NOT NULL DEFAULT now()
+);
+CREATE INDEX IF NOT EXISTS af_event_map_stage_idx ON af_event_map (stage_key);
