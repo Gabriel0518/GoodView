@@ -39,16 +39,18 @@ async function main() {
   }
 
   // 3) 逐行校验
-  const valid = [];      // { category, value, name, store_layer, enabled }
+  const valid = [];      // { category, value, name, store_layer, enabled, group_name }
   const writeback = [];  // { record_id, fields:{状态} }
   const seen = new Set();
   const counts = { account: 0, campaign: 0, metric: 0 };
+  const groups = {};     // 归属 → 账户数（只用于日志）
   for (const rec of records) {
     const f = rec.fields || {};
     const category = cellStr(f[F.category]).trim();
     const value = cellStr(f[F.value]).trim();
     const name = cellStr(f[F.name]).trim();
     const layer = cellStr(f[F.layer]).trim();
+    const group = cellStr(f[F.group]).trim();
     const enabled = cellBool(f[F.enabled]);
     if (!value && !category) continue; // 完全空行忽略
 
@@ -62,9 +64,12 @@ async function main() {
         status = `❌ 重复：${category}/${v.value} 已在上方出现`;
       } else {
         seen.add(key);
-        valid.push({ category: v.kind, value: v.value, name: name || null, store_layer: v.layer || null, enabled });
+        valid.push({ category: v.kind, value: v.value, name: name || null, store_layer: v.layer || null, enabled, group_name: group || null });
         if (enabled) counts[v.kind]++;
-        const tag = v.kind === "metric" ? `${v.label}(${v.layer})` : v.kind === "account" ? "账户" : "系列";
+        if (enabled && v.kind === "account") groups[group || "PWA(默认)"] = (groups[group || "PWA(默认)"] || 0) + 1;
+        // 账户/系列行把归属带进状态，飞书里一眼看出这笔花费算进哪个看板
+        const tag = v.kind === "metric" ? `${v.label}(${v.layer})`
+          : `${v.kind === "account" ? "账户" : "系列"}${group ? `·${group}` : ""}`;
         status = enabled ? `✅ ${tag}` : `⏸ 已停用（${tag}）`;
       }
     }
@@ -76,9 +81,9 @@ async function main() {
     await c.query(`DELETE FROM xmp_fetch_config`);
     for (const r of valid) {
       await c.query(
-        `INSERT INTO xmp_fetch_config (category, value, name, store_layer, enabled, status, updated_at)
-         VALUES ($1,$2,$3,$4,$5,$6, now())`,
-        [r.category, r.value, r.name, r.store_layer, r.enabled, r.enabled ? "ok" : "disabled"],
+        `INSERT INTO xmp_fetch_config (category, value, name, store_layer, enabled, status, group_name, updated_at)
+         VALUES ($1,$2,$3,$4,$5,$6,$7, now())`,
+        [r.category, r.value, r.name, r.store_layer, r.enabled, r.enabled ? "ok" : "disabled", r.group_name],
       );
     }
   });
@@ -93,8 +98,9 @@ async function main() {
   const scope = counts.account || counts.campaign
     ? `范围=白名单（账户 ${counts.account} · 系列 ${counts.campaign}）`
     : `范围=全部账户（无账户/系列行）`;
+  const groupStr = Object.entries(groups).map(([k, v]) => `${k} ${v}`).join(" · ");
   console.log(
-    `[配置同步] 飞书 ${records.length} 行 → 有效 ${valid.length} · 启用指标 ${counts.metric} · ${scope} · 回写状态 ${wrote} 行`,
+    `[配置同步] 飞书 ${records.length} 行 → 有效 ${valid.length} · 启用指标 ${counts.metric} · ${scope}${groupStr ? ` · 归属：${groupStr}` : ""} · 回写状态 ${wrote} 行`,
   );
 }
 

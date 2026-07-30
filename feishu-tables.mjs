@@ -7,6 +7,7 @@
 import { FT, dateMs, dateNum } from "./lib/feishu.mjs";
 import { FEISHU } from "./config.mjs";
 import { loadAdGroups, resolveGroupToCampaignIds } from "./lib/groups.mjs";
+import { REGION_LABEL } from "./lib/key-metrics.mjs";
 import { query } from "./lib/db.mjs";
 
 // 单选字段种子选项（新值写入时飞书会自动补建，这里只给已知值配色）
@@ -15,6 +16,7 @@ const CHANNELS = ["facebook", "tiktok", "google"];
 const SOURCES = ["fb", "tt", "bff", "AIguild", "AIguild_active", "AIguild_passive", "google", "unknown"];
 
 const num = (v) => (v == null ? 0 : Number(v));
+const round2 = (v) => Math.round(num(v) * 100) / 100; // 花费类：截到分，避免飞书里一串浮点尾数
 const jstr = (v) => (v == null ? "" : typeof v === "string" ? v : JSON.stringify(v));
 
 const adsetGrain = FEISHU.campaignGrain === "adset";
@@ -212,11 +214,15 @@ export const xmpConfigTable = {
   key: "xmp_fetch_config",
   name: "XMP抓取配置",
   reverse: true,
-  F: { value: "值", category: "类别", name: "名称", layer: "落库层", enabled: "启用", status: "状态" },
+  F: { value: "值", category: "类别", name: "名称", layer: "落库层", enabled: "启用", status: "状态", group: "广告账户归属" },
   fields: [
     { field_name: "值", type: FT.TEXT }, // 主字段：账户ID/系列ID（或其名称）或 指标（曝光/impression）
     { field_name: "类别", type: FT.SINGLE_SELECT, property: seed(["广告账户", "广告系列", "指标"]) },
     { field_name: "名称", type: FT.TEXT }, // 可读备注（账户/系列名；指标可留空）
+    // 归属决定这个账户的花费算进哪个看板：PWA / AI公会 / 上架包（SmartReply）。
+    // 填「上架包」的账户 → 花费只进「上架包渠道日报」，并从 PWA 口径剔除（它们的转化走 AppsFlyer
+    // 不走 BytePlus，留在 PWA 看板会变成「有花费零转化」，把 PWA 单价整体抬高）。留空按 PWA 处理。
+    { field_name: "广告账户归属", type: FT.TEXT },
     { field_name: "落库层", type: FT.SINGLE_SELECT, property: seed(["core", "ext"]) }, // 仅「指标」行用
     { field_name: "启用", type: FT.CHECKBOX },
     { field_name: "状态", type: FT.TEXT }, // 脚本回写：✅ / ❌ 原因
@@ -449,14 +455,18 @@ const pwaAccountTable = (name, accId) => ({
 // 所以这些账户的花费**必须**从 PWA 看板剔除——否则分母有花费、分子永远没转化，会把 PWA 单价整体抬高
 // （2026-07-29 发现时已污染 4 天、$942：Google $483 + TikTok $381 + Facebook $78，且不止 Google 行，
 //  TikTok/Facebook 行也被抬高）。剔除逻辑见 resolveDerivedGroups，与「公会账户自动排除」同款。
-// 加/减上架包账户改这里一处：既决定「上架包渠道日报」算谁，也决定从 PWA 看板剔除谁。
-// 已核对（2026-07-29）：三个账户各只有一条 SmartReply 系列，无 PWA 系列混投，可整账户切走。
+//
+// 2026-07-30 起**改成配置驱动**：账户归属看飞书「XMP抓取配置」的「广告账户归属」列，填「上架包」
+// （或 SmartReply/SR）即算上架包 → 加账户只在飞书加一行，不用改码。下面这份是**兜底默认**：
+// 配置表里一个「上架包」归属都没有时（列没填/飞书读不到）才用，保证行为不回退。
 const APP_ACCOUNTS = [
   { id: "6245583421",          name: "AI Fantasy-T8088",   channel: "google" },   // SR_android_wcx_install_0724_gg
   { id: "7665547836257058834", name: "省广_SR_and_1-5D80", channel: "tiktok" },   // Smart Reply-test
   { id: "27589868840681799",   name: "省广_SR_and_5_wcx",  channel: "facebook" }, // Smart Reply_android_wcx_install_0725
+  { id: "1013644987935186",    name: "QQ-TZCH-3A-0721+8-01", channel: "facebook" }, // Smart Reply_android_0729（2026-07-29 开投）
 ];
-const APP_ACCOUNT_IDS = APP_ACCOUNTS.map((a) => a.id);
+// 归属列填什么算上架包（大小写不敏感、含即匹配）
+const APP_GROUP_PATTERN = /上架包|smart\s*reply|smartreply|\bSR\b/i;
 
 // 上架包渠道日报（date × 渠道，结构对齐 PWA渠道日报，便于两个产品横向对比）：
 //   花费   = campaign_daily 上架包账户 按 channel（XMP）
@@ -468,7 +478,7 @@ const APP_ACCOUNT_IDS = APP_ACCOUNTS.map((a) => a.id);
 //   （挂着恒为 0 的注册列会被误读成「没人注册」，而真实原因是打点没到，比没有这列更糟。）
 //   af_events 仍在持续收全部 AF 事件、一条不丢；打点补全后把 af_event_map 里的
 //   af_login_success 置回 enabled、加回两列即可，历史数据不会缺。
-const appDailyTable = () => ({
+const appDailyTable = (accountIds) => ({
   key: "app_daily",
   name: "上架包渠道日报",
   windowed: true,
@@ -505,7 +515,7 @@ const appDailyTable = () => ({
       LEFT JOIN inst  i ON i.date=d.date AND i.channel=ch.channel
       WHERE COALESCE(s.cost,0)>0 OR COALESCE(i.conv,0)>0
       ORDER BY d.date DESC, ch.so`,
-    params: [from, to, APP_ACCOUNT_IDS],
+    params: [from, to, accountIds],
   }),
   toFields: (r) => {
     const cost = num(r.cost), inst = num(r.installs);
@@ -668,6 +678,222 @@ const retentionTable = (key, name, category) => ({
 const retentionUser = retentionTable("retention_user", "用户留存", "user");
 const retentionChengcai = retentionTable("retention_chengcai", "成材女留存", "chengcai");
 
+// ===== 关键指标日报（德州 / 非德州 / 全量）=====
+// 数据来自 key_metric_daily（fetch-key-metrics.mjs），口径 = BytePlus「PWA 德州关键指标转化率看板」
+// 官方配置，逐字定义在 lib/key-metrics.mjs。一行 = 一天 × 一个地区，6 个指标横排 → 飞书里直接做
+// 双轴/对比图（地区做系列）。
+// ⚠️ 「成材用户」是 PV(总次数)，其余 5 个是 UV(去重人数)——官方看板就这么配的，别当人数解读。
+// ⚠️ 三个地区各自独立查询：德州+非德州 会略大于 全量（跨州用户两边各算一次，实测 +0.4%），
+//    所以别用 全量−德州 当非德州，直接取「非德州」行。
+// 转化率分母的选择：官方链路是 曝光→安装→注册→(可分发/IG/成材)，但注册人数 > 安装成功人数
+//    （很多人不装 PWA 直接在浏览器里注册），若按 注册/安装 会 >100% 误导 → 前两级都以曝光为分母，
+//    后三级以注册为分母。
+// 「广告消耗」列（XMP，按地区填）：
+//    全量   = PWA 口径账户花费 **剔除 AI公会系列**（公会有独立看板，花费另算）。2026-07-30 与用户
+//             参考数核对：7/28 剔公会后 $1930.72 vs 用户 $1930.62（差 $0.10 是 XMP 账户时区混用
+//             上海/香港的边界零头）；不剔公会是 $1977.64，差的正是公会系列 $46.92。
+//    德州   = 定向德州的系列花费（系列名 ~* TX_CAMPAIGN_PATTERN；XMP 无州级维度，只能按系列切）
+//    非德州 = 全量 − 德州系列
+// ⚠️ 花费按**系列定向**切，转化按**用户属性省份**切，两者不是同一批人：全美投放的系列同样会带来
+//    德州用户 → 「德州」行的消耗偏小、「非德州」行偏大。做德州单价要知道这是低估；要粗估德州真实
+//    成本，用 全量消耗 × 德州注册占比（见「德州近30日统计」表）。
+// ⚠️ 转化锚 America/Chicago（德州本地，对齐官方看板），花费锚 XMP 账户时区（上海/香港），两者差约
+//    13 小时 → 单价是近似值。见 lib/key-metrics.mjs KEY_METRIC_TIMEZONE。
+const keyMetricTable = (guildCampaigns) => ({
+  key: "key_metric_daily",
+  name: "关键指标日报",
+  windowed: true,
+  fields: [
+    { field_name: "标识", type: FT.TEXT },
+    { field_name: "日期", type: FT.DATE },
+    { field_name: "date_num", type: FT.NUMBER },
+    { field_name: "地区", type: FT.SINGLE_SELECT, property: { options: [{ name: "德州", color: 1 }, { name: "非德州", color: 3 }, { name: "全量", color: 5 }] } },
+    { field_name: "地区名称", type: FT.TEXT },
+    { field_name: "广告消耗", type: FT.NUMBER },
+    { field_name: "投广页曝光", type: FT.NUMBER },
+    { field_name: "安装成功", type: FT.NUMBER },
+    { field_name: "用户注册", type: FT.NUMBER },
+    { field_name: "可分发用户", type: FT.NUMBER },
+    { field_name: "IG绑定用户", type: FT.NUMBER },
+    { field_name: "成材用户(次数)", type: FT.NUMBER },
+    { field_name: "安装率%(安装/曝光)", type: FT.NUMBER },
+    { field_name: "注册率%(注册/曝光)", type: FT.NUMBER },
+    { field_name: "可分发率%(可分发/注册)", type: FT.NUMBER },
+    { field_name: "IG绑定率%(IG/注册)", type: FT.NUMBER },
+    { field_name: "成材率%(成材/注册)", type: FT.NUMBER },
+    { field_name: "注册单价", type: FT.NUMBER },
+  ],
+  sql: (from, to) => ({
+    text: `
+      WITH km AS (
+        SELECT date, region,
+               COALESCE(SUM(count) FILTER (WHERE metric_key = 'lp_show'), 0)::bigint         AS lp_show,
+               COALESCE(SUM(count) FILTER (WHERE metric_key = 'install_success'), 0)::bigint AS install_success,
+               COALESCE(SUM(count) FILTER (WHERE metric_key = 'register'), 0)::bigint        AS register,
+               COALESCE(SUM(count) FILTER (WHERE metric_key = 'distributable'), 0)::bigint   AS distributable,
+               COALESCE(SUM(count) FILTER (WHERE metric_key = 'ig_bind'), 0)::bigint         AS ig_bind,
+               COALESCE(SUM(count) FILTER (WHERE metric_key = 'chengcai'), 0)::bigint        AS chengcai
+          FROM key_metric_daily
+         WHERE date BETWEEN $1 AND $2
+         GROUP BY date, region
+        HAVING SUM(count) > 0
+      ),
+      -- PWA 口径账户 = 抓取配置里非「上架包」归属的账户（上架包转化走 AF，花费不能混进来）
+      acc AS (
+        SELECT value FROM xmp_fetch_config
+         WHERE category='account' AND enabled AND (group_name IS NULL OR group_name !~* '上架包|smart ?reply')
+      ),
+      sp AS (
+        SELECT date,
+               COALESCE(SUM(cost), 0)                                        AS all_cost,
+               COALESCE(SUM(cost) FILTER (WHERE campaign_name ~* $3), 0)      AS tx_cost
+          FROM campaign_daily
+         WHERE date BETWEEN $1 AND $2 AND account_id IN (SELECT value FROM acc)
+           AND campaign_id <> ALL($4::text[])   -- 剔除 AI公会系列（花费归公会看板）
+         GROUP BY date
+      )
+      SELECT to_char(km.date,'YYYY-MM-DD') AS date, km.region,
+             km.lp_show, km.install_success, km.register, km.distributable, km.ig_bind, km.chengcai,
+             (CASE km.region
+                WHEN 'TX'    THEN COALESCE(sp.tx_cost, 0)
+                WHEN 'nonTX' THEN COALESCE(sp.all_cost, 0) - COALESCE(sp.tx_cost, 0)
+                ELSE              COALESCE(sp.all_cost, 0)
+              END)::float8 AS cost
+        FROM km LEFT JOIN sp ON sp.date = km.date
+       ORDER BY km.date DESC, km.region`,
+    params: [from, to, TX_CAMPAIGN_PATTERN, guildCampaigns],
+  }),
+  toFields: (r) => {
+    const label = REGION_LABEL[r.region] || r.region;
+    const lp = num(r.lp_show), inst = num(r.install_success), reg = num(r.register);
+    const dist = num(r.distributable), ig = num(r.ig_bind), cc = num(r.chengcai);
+    const cost = round2(r.cost);
+    const f = {
+      标识: `${r.date}|${r.region}`,
+      日期: dateMs(r.date), date_num: dateNum(r.date),
+      地区: label, 地区名称: label,
+      广告消耗: cost,
+      投广页曝光: lp, 安装成功: inst, 用户注册: reg,
+      可分发用户: dist, IG绑定用户: ig, "成材用户(次数)": cc,
+    };
+    // 分母为 0 的率留空（不写 0），避免"0%"被读成真的没转化
+    const rate = (a, b) => (b > 0 ? Math.round((a / b) * 10000) / 100 : undefined);
+    const add = (k, v) => { if (v !== undefined) f[k] = v; };
+    add("安装率%(安装/曝光)", rate(inst, lp));
+    add("注册率%(注册/曝光)", rate(reg, lp));
+    add("可分发率%(可分发/注册)", rate(dist, reg));
+    add("IG绑定率%(IG/注册)", rate(ig, reg));
+    add("成材率%(成材/注册)", rate(cc, reg));
+    if (cost > 0) add("注册单价", price(cost, reg)); // 无花费的日子留空，别显示 $0
+    return f;
+  },
+});
+
+// ===== 德州近30日统计（德州转化 + 分渠道消耗，一天一行，给飞书仪表盘直接用）=====
+//
+// 【转化】来自 key_metric_daily 的 region='TX'（BytePlus 官方关键指标口径，按用户属性
+//   loc_province_id=4736286 精确切德州；成材是 PV 次数，其余是 UV 人数）。
+//
+// 【消耗】XMP **没有州级维度**（geo 维度只到国家，PWA 账户全是 US），所以德州花费只能取
+//   **定向德州的广告系列**：系列名含 texas/德州/德克萨斯。近30天 11 条系列全用 "texas" 命名，
+//   无其它变体；2026-07-21 才开投。分渠道用 campaign_daily.channel（XMP module）。
+//
+// ⚠️ 两个口径**不是同一批人**，看单价时必须知道：
+//   · 德州转化 = 所有德州用户，含全美投放系列带来的（7/21 之前德州系列还没开，转化却一直有）。
+//   · 德州系列花费 = 只有定向德州的那几条系列。
+//   → 「德州系列注册单价」是**低估**（分母含非德州系列带来的德州用户）。要粗估德州总成本，
+//     用 PWA全部花费 × 德州注册占比（表里都给了，仪表盘里自己乘）。
+//   · 单价仅在当天德州系列有花费时给出，否则留空（7/21 前全部留空，不是 0）。
+const TX_CAMPAIGN_PATTERN = "texas|德州|德克萨斯";
+const txDailyTable = (guildCampaigns) => ({
+  key: "tx_daily",
+  name: "德州近30日统计",
+  windowed: true,
+  fields: [
+    { field_name: "标识", type: FT.TEXT },
+    { field_name: "日期", type: FT.DATE },
+    { field_name: "date_num", type: FT.NUMBER },
+    // —— 德州转化（BytePlus，精确到州）——
+    { field_name: "投广页曝光", type: FT.NUMBER },
+    { field_name: "安装成功", type: FT.NUMBER },
+    { field_name: "用户注册", type: FT.NUMBER },
+    { field_name: "可分发用户", type: FT.NUMBER },
+    { field_name: "IG绑定用户", type: FT.NUMBER },
+    { field_name: "成材用户(次数)", type: FT.NUMBER },
+    // —— 德州定向系列花费，分渠道（XMP）——
+    { field_name: "Facebook花费", type: FT.NUMBER },
+    { field_name: "TikTok花费", type: FT.NUMBER },
+    { field_name: "Google花费", type: FT.NUMBER },
+    { field_name: "德州系列花费", type: FT.NUMBER },
+    // —— 参考口径 ——
+    { field_name: "PWA全部花费", type: FT.NUMBER },
+    { field_name: "德州注册占比%", type: FT.NUMBER },
+    { field_name: "德州系列注册单价", type: FT.NUMBER },
+    { field_name: "德州系列成材单价", type: FT.NUMBER },
+  ],
+  sql: (from, to) => ({
+    text: `
+      WITH d AS (SELECT generate_series($1::date, $2::date, '1 day')::date AS date),
+      km AS (
+        SELECT date,
+               SUM(count) FILTER (WHERE metric_key='lp_show'         AND region='TX')  AS lp,
+               SUM(count) FILTER (WHERE metric_key='install_success' AND region='TX')  AS inst,
+               SUM(count) FILTER (WHERE metric_key='register'        AND region='TX')  AS reg,
+               SUM(count) FILTER (WHERE metric_key='distributable'   AND region='TX')  AS dist,
+               SUM(count) FILTER (WHERE metric_key='ig_bind'         AND region='TX')  AS ig,
+               SUM(count) FILTER (WHERE metric_key='chengcai'        AND region='TX')  AS cc,
+               SUM(count) FILTER (WHERE metric_key='register'        AND region='all') AS reg_all
+          FROM key_metric_daily WHERE date BETWEEN $1 AND $2 GROUP BY date
+      ),
+      -- PWA 口径账户 = 抓取配置里非「上架包」归属的账户（上架包转化走 AF，不掺进来）
+      acc AS (
+        SELECT value FROM xmp_fetch_config
+         WHERE category='account' AND enabled AND (group_name IS NULL OR group_name !~* '上架包|smart ?reply')
+      ),
+      sp AS (
+        SELECT date,
+               SUM(cost) FILTER (WHERE campaign_name ~* $3 AND channel='facebook') AS tx_fb,
+               SUM(cost) FILTER (WHERE campaign_name ~* $3 AND channel='tiktok')   AS tx_tt,
+               SUM(cost) FILTER (WHERE campaign_name ~* $3 AND channel='google')   AS tx_gg,
+               SUM(cost) FILTER (WHERE campaign_name ~* $3)                        AS tx_all,
+               SUM(cost)                                                           AS pwa_all
+          FROM campaign_daily
+         WHERE date BETWEEN $1 AND $2 AND account_id IN (SELECT value FROM acc)
+           AND campaign_id <> ALL($4::text[])   -- 剔除 AI公会系列（花费归公会看板）
+         GROUP BY date
+      )
+      SELECT to_char(d.date,'YYYY-MM-DD') AS date,
+             COALESCE(km.lp,0)::bigint lp, COALESCE(km.inst,0)::bigint inst, COALESCE(km.reg,0)::bigint reg,
+             COALESCE(km.dist,0)::bigint dist, COALESCE(km.ig,0)::bigint ig, COALESCE(km.cc,0)::bigint cc,
+             COALESCE(km.reg_all,0)::bigint reg_all,
+             COALESCE(sp.tx_fb,0)::float8 tx_fb, COALESCE(sp.tx_tt,0)::float8 tx_tt,
+             COALESCE(sp.tx_gg,0)::float8 tx_gg, COALESCE(sp.tx_all,0)::float8 tx_all,
+             COALESCE(sp.pwa_all,0)::float8 pwa_all
+        FROM d LEFT JOIN km ON km.date = d.date LEFT JOIN sp ON sp.date = d.date
+       ORDER BY d.date DESC`,
+    params: [from, to, TX_CAMPAIGN_PATTERN, guildCampaigns],
+  }),
+  toFields: (r) => {
+    const reg = num(r.reg), cc = num(r.cc), txAll = num(r.tx_all), regAll = num(r.reg_all);
+    const f = {
+      标识: r.date,
+      日期: dateMs(r.date), date_num: dateNum(r.date),
+      投广页曝光: num(r.lp), 安装成功: num(r.inst), 用户注册: reg,
+      可分发用户: num(r.dist), IG绑定用户: num(r.ig), "成材用户(次数)": cc,
+      Facebook花费: round2(r.tx_fb), TikTok花费: round2(r.tx_tt), Google花费: round2(r.tx_gg),
+      德州系列花费: round2(txAll), PWA全部花费: round2(r.pwa_all),
+    };
+    const add = (k, v) => { if (v !== undefined) f[k] = v; };
+    add("德州注册占比%", regAll > 0 ? Math.round((reg / regAll) * 10000) / 100 : undefined);
+    // 单价仅在德州系列当天真有花费时给（否则留空，别让 7/21 前的空窗显示成 $0）
+    if (txAll > 0) {
+      add("德州系列注册单价", price(txAll, reg));
+      add("德州系列成材单价", price(txAll, cc));
+    }
+    return f;
+  },
+});
+
 // 从 ad_groups / 抓取配置解析派生看板的账户/系列集合。找不到配置时回退到写死的默认值，保证行为不变。
 //   AI公会 = 名称含「AI公会/AIguild/公会」的分组 → 展开为 campaign_id 集合（花费按系列过滤）。
 //   PWA(非公会)看板账户 = 「XMP抓取配置」里 category='account' 的账户行，自动排除拥有公会系列的账户
@@ -689,11 +915,13 @@ async function resolveDerivedGroups() {
     } catch { /* 保留默认 */ }
   }
 
-  // PWA(非公会)看板账户集（[{id,name}]）：抓取配置的 account 行 − 公会账户 − 无花费账户，回退写死默认。
+  // PWA(非公会)看板账户集（[{id,name}]）：抓取配置的 account 行 − 公会账户 − 上架包账户 − 无花费账户，
+  // 回退写死默认。上架包账户集同样从配置的「广告账户归属」列解析（回退 APP_ACCOUNTS）。
   let pwaAccounts = PWA_ACCOUNTS.map((id, i) => ({ id, name: PWA_ACCOUNT_NAMES[i] || id }));
+  let appAccounts = APP_ACCOUNTS.map((a) => ({ id: a.id, name: a.name }));
   try {
     const { rows: accRows } = await query(
-      `SELECT value, name FROM xmp_fetch_config WHERE category = 'account' AND enabled = true`,
+      `SELECT value, name, group_name FROM xmp_fetch_config WHERE category = 'account' AND enabled = true`,
     );
     if (accRows.length) {
       // 公会账户 = 拥有任一 AI公会 campaign 的账户（自动排除，避免与公会看板重复计花费）
@@ -715,6 +943,20 @@ async function resolveDerivedGroups() {
       const nameById = new Map(acc.map((a) => [a.account_id, a.account_name]));
       const idByName = new Map(acc.map((a) => [a.account_name, a.account_id]));
       const spendById = new Set(acc.filter((a) => a.recent_cost > 0).map((a) => a.account_id));
+      // 值(id 或名称) → 规范 {id, name}；查无此账户返回 null
+      const canon = (v) => (nameById.has(v) ? { id: v, name: nameById.get(v) }
+        : idByName.has(v) ? { id: idByName.get(v), name: v } : null);
+
+      // 上架包(SmartReply)账户 = 归属列填「上架包/SmartReply/SR」的账户行。
+      // 配置里一个都没标 → 保留写死的 APP_ACCOUNTS 兜底（防归属列没填就把上架包花费混回 PWA）。
+      const fromCfg = [];
+      for (const r of accRows) {
+        if (!APP_GROUP_PATTERN.test(r.group_name || "")) continue;
+        const c = canon(r.value);
+        if (c && !fromCfg.some((x) => x.id === c.id)) fromCfg.push({ id: c.id, name: r.name || c.name });
+      }
+      if (fromCfg.length) appAccounts = fromCfg;
+
       const seen = new Set();
       const resolved = [];
       for (const r of accRows) {
@@ -723,7 +965,7 @@ async function resolveDerivedGroups() {
         else if (idByName.has(r.value)) { id = idByName.get(r.value); nm = r.value; }
         else continue;                        // 填的值在库里查无此账户 → 跳过（无数据可展示）
         if (guildAccIds.has(id)) continue;     // 排除公会账户（花费归公会看板）
-        if (APP_ACCOUNT_IDS.includes(id)) continue; // 排除上架包账户（花费归「上架包渠道日报」；
+        if (appAccounts.some((a) => a.id === id)) continue; // 排除上架包账户（花费归「上架包渠道日报」；
                                                // 它们的转化在 AF 不在 BytePlus，留在这儿会永远是「有花费零转化」）
         if (!spendById.has(id)) continue;     // 排除近 60 天零花费账户（免建空的账户系列表）
         if (seen.has(id)) continue;
@@ -734,7 +976,7 @@ async function resolveDerivedGroups() {
     }
   } catch { /* 读配置失败 → 保留默认 */ }
 
-  return { aiguildCampaigns, pwaAccounts };
+  return { aiguildCampaigns, pwaAccounts, appAccounts };
 }
 
 // 构建全部镜像表（含从 ad_groups 动态解析的派生看板）。异步：需先查库解析分组。
@@ -754,7 +996,9 @@ export async function buildTables() {
     ...g.pwaAccounts.map((a) => pwaAccountTable(a.name, a.id)),
     pwaDailyTable(pwaAccIds),
     pwaSummaryTable(pwaAccIds),
-    appDailyTable(),
+    appDailyTable(g.appAccounts.map((a) => a.id)),
+    txDailyTable(g.aiguildCampaigns),
+    keyMetricTable(g.aiguildCampaigns),
     retentionUser,
     retentionChengcai,
   ];

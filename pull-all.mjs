@@ -61,6 +61,11 @@ async function main() {
   const aiOsCode = await run("node", ["fetch-aiguild-os.mjs"]);
   if (aiOsCode !== 0) console.warn(`  ⚠️ AI公会分端拉取返回 ${aiOsCode}（不影响主流程）`);
 
+  // 关键指标 × 地区(德州/非德州/全量)——写 key_metric_daily，供「关键指标日报」。
+  // 官方关键指标口径（lib/key-metrics.mjs），与 funnel 各存一份，失败不影响主库/退出码。
+  const kmCode = await run("node", ["fetch-key-metrics.mjs", ...daysArg]);
+  if (kmCode !== 0) console.warn(`  ⚠️ 关键指标拉取返回 ${kmCode}（不影响主流程）`);
+
   const ok = snapCode === 0 && funnelCode === 0;
   await query(
     "UPDATE pull_runs SET finished_at = now(), ok = $2, snapshot_ok = $3, funnel_ok = $4 WHERE id = $1",

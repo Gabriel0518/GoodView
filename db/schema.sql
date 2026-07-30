@@ -117,9 +117,11 @@ CREATE TABLE IF NOT EXISTS xmp_fetch_config (
   store_layer text,                                -- 'core' | 'ext'（仅 metric 用）
   enabled     boolean     NOT NULL DEFAULT true,
   status      text,                                -- 校验/运行状态（回写飞书）
+  group_name  text,                                -- 归属：PWA / AI公会 / 上架包（仅 account 行用；决定花费算进哪个看板）
   updated_at  timestamptz NOT NULL DEFAULT now(),
   PRIMARY KEY (category, value)
 );
+ALTER TABLE xmp_fetch_config ADD COLUMN IF NOT EXISTS group_name text;
 
 -- ========== campaign_metric_daily：扩展指标长表（EAV）==========
 -- 配置里标 ext 的指标落这里，永不改表结构；核心 cost/impression/click 仍在 campaign_daily 宽表。
@@ -297,3 +299,24 @@ CREATE TABLE IF NOT EXISTS af_event_map (
   updated_at    timestamptz NOT NULL DEFAULT now()
 );
 CREATE INDEX IF NOT EXISTS af_event_map_stage_idx ON af_event_map (stage_key);
+
+
+-- ========== key_metric_daily：date × 关键指标 × 地区 -> 数值（BytePlus 官方关键指标口径）==========
+-- 口径定义在 lib/key-metrics.mjs（逐字对齐 BytePlus 报表「PWA 德州关键指标转化率看板」）。
+--   metric_key : lp_show / install_success / register / distributable / ig_bind / chengcai
+--   region     : TX(德州) / nonTX(非德州) / all(全量)
+--   count      : UV 去重人数（成材是 PV 总次数，见 lib/key-metrics.mjs 注释）
+-- 为什么独立于 funnel_daily：① 多一个地区维度 ② 成材口径不同(PV vs UV) ③ 官方看板的 6 个指标
+-- 是独立一套"关键指标"，与 50 阶段全漏斗互不覆盖。三个地区都存行，不要用 all−TX 推 nonTX
+-- （loc_province_id 按事件归因，跨州用户两边都算，TX+nonTX 略大于 all）。
+CREATE TABLE IF NOT EXISTS key_metric_daily (
+  date       date        NOT NULL,
+  metric_key text        NOT NULL,
+  region     text        NOT NULL,
+  count      bigint      NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (date, metric_key, region)
+);
+CREATE INDEX IF NOT EXISTS key_metric_daily_date_idx   ON key_metric_daily (date);
+CREATE INDEX IF NOT EXISTS key_metric_daily_region_idx ON key_metric_daily (region, date);
+

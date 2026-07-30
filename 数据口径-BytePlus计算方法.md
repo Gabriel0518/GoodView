@@ -210,3 +210,87 @@
 - [ ] AI公会 = 3 个 source 之和；早期曝光类**不要**按 source 拆
 - [ ] `page.limit=1000` 防截断
 - [ ] 花费与人数分属两套系统，按 date+campaign/source 对齐，别跨立方硬拼
+
+---
+
+## 11. 关键指标 × 地区（德州实验）—— 2026-07-30 新增
+
+BytePlus 看板 **「PWA德州实验看板」** `dashboard_id=7668155095304897077`（7 张报表）。本项目落地的是其中
+**「PWA 德州关键指标转化率看板」`report_id=7668160292471177733`** 的官方配置，逐字实现在 `lib/key-metrics.mjs`。
+
+### 11.1 六个关键指标（官方「配置指标」）
+
+| 标签 | 显示名 | event_name | 指标 | 事件过滤 |
+|---|---|---|---|---|
+| A | 投广页曝光 | `pwa_conv_lp_show` | `event_users` 总人数(UV) | — |
+| B | 安装成功 | `web_install_success` | `event_users` UV | — |
+| C | 用户注册 | `pwa_conv_cash_ready_pop_show` | `event_users` UV | — |
+| D | 可分发用户 | `pwa_conv_live_start_click` | `event_users` UV | — |
+| E | IG绑定用户 | `pwa_task_complete` | `event_users` UV | `task_id = 110`（数字） |
+| F | 成材用户 | `pwa_withdraw_audit_apply` | **`events` 总次数(PV)** | `withdraw_amount = 25`（数字） |
+
+⚠️ 与 §5/§10 的老口径两处**故意不同**，别顺手统一：
+
+1. **成材是 PV(总次数)**，不是 UV；且**没有** `will_cashout_stage=CashoutStageFive` 的 OR 条件。
+   实测 30 天全量：`25 OR CashoutStageFive · UV = 325`｜**官方 `25 · PV = 350`**｜`25 · UV = 305`。
+   `funnel_stage_meta.chengcai` 仍是老口径 UV+OR（AI公会/PWA 的「成材人数」「成材单价」用它做分子/分母），
+   两套并存、各自正确 —— 一个是"关键指标看板的成材次数"，一个是"成材人数"。
+2. funnel 的阶段名沿用全漏斗命名（`cash_ready_show`=0.5刀提现弹窗-注册完成、`live_go`=Live页 Go Live、
+   `task_ins_bind`=绑定Ins任务完成），官方关键指标叫「用户注册 / 可分发用户 / IG绑定用户」。同一事件、两套名字。
+
+### 11.2 细分筛选（**不带就不准**）
+
+官方 `profile_filters`（关键指标看板逐字）：
+
+```
+is_test (profile)      != ["true", ""]
+isTest  (event_param)  != ["true"]
+loc_province_id (profile) = "4736286"     ← 德克萨斯州
+```
+
+- 前两条 = 排除测试用户，`lib/byteplus.mjs` 的 `IS_TEST_EXPRS` 对所有查询强制加。实测带不带空串结果一致
+  （7 天注册 2061 = 2061），保留空串只为与官方逐字一致。
+- **省份属性 = `loc_province_id`（profile），德州 = `4736286`**。按它分组返回的是 URL 编码中文省名
+  （`%E5%BE%B7%E5%85%8B%E8%90%A8%E6%96%AF%E5%B7%9E` = 德克萨斯州），**过滤要用数字 id**。
+  `loc_province`（省名属性）不存在。
+
+### 11.3 三个地区各存一行，别用减法
+
+`REGION_EXPRS`（`lib/byteplus.mjs`）：`TX` = `loc_province_id = 4736286`；`nonTX` = `!= 4736286`（含省份未知）；
+`all` = 不加省份条件。
+
+⚠️ **TX + nonTX 略大于 all**（实测 7 天注册 376 + 1694 = 2070 vs 全量 2061，+0.4%）：`loc_province_id`
+是按事件归因的用户属性，同一人窗口内在州内州外都有事件时两边各算一次。所以三个地区**各自独立查询、各存一行**，
+仪表盘直接取「非德州」行，不要拿 `全量 − 德州` 推。
+
+### 11.4 时区
+
+官方德州看板锚 **America/Chicago**；本管道用项目默认 **Asia/Shanghai**（`config.mjs BYTEPLUS.timezone`），
+与 XMP 花费同一天界，方便和花费同表对比。实测德州注册 7 天：上海 376 / 芝加哥 336，差额几乎全在"今天"那半天
+（芝加哥当天才过了几小时）。要复核官方数字：`fetchEventDaily({..., timezone: "America/Chicago"})`。
+
+### 11.5 落地
+
+| 环节 | 位置 |
+|---|---|
+| 口径定义 | `lib/key-metrics.mjs`（`KEY_METRICS` / `REGIONS`） |
+| 抓取 | `fetch-key-metrics.mjs`（6 指标 × 3 地区 = 18 请求，并发池；`npm run pull:keymetrics`），已接入 `pull-all.mjs` |
+| 存储 | Postgres `key_metric_daily(date, metric_key, region, count)` |
+| 飞书 | 表「关键指标日报」`tblYbprDnPbGfRLy`（一行 = 一天 × 一地区，6 指标横排 + 5 个比率） |
+
+比率的分母：官方链路是 曝光→安装→注册→(可分发/IG/成材)，但**注册人数 > 安装成功人数**（很多人不装 PWA
+直接在浏览器注册），按 注册/安装 会 >100% 误导 → 前两级以曝光为分母，后三级以注册为分母。
+即便如此，**「可分发/注册」仍可能 >100%**：可分发是当天活跃人数（含往日注册的老用户），
+和当天注册人数不是同一批人 —— 这是日切面比值，不是同期群转化率。
+
+### 11.6 德州花费口径（XMP 无州级维度）
+
+XMP 的 `geo` 维度**只到国家**（PWA 账户全部返回 `US`，2026-07-30 实测），拿不到州级花费。故「德州花费」
+= **定向德州的广告系列**：`campaign_name ~* 'texas|德州|德克萨斯'`（`feishu-tables.mjs` 常量
+`TX_CAMPAIGN_PATTERN`），账户范围取抓取配置里归属非「上架包」的账户，渠道用 `campaign_daily.channel`。
+近 30 天命中 11 条系列、全用 "texas" 命名、无其它变体，**2026-07-21 才开投**（Facebook + TikTok，Google 无）。
+
+⚠️ 德州**转化**（按用户属性 `loc_province_id` 精确切）与德州**花费**（按系列名切）**不是同一批人**：
+全美投放的系列同样会带来德州用户（7/21 之前德州系列还没开，德州注册却一直有）。所以
+「德州系列注册单价」偏低（分母含非德州系列带来的德州用户）；要估德州总成本，用
+`PWA全部花费 × 德州注册占比%`。落地表：飞书「德州近30日统计」`tblrILGMDezTT9CG`（`txDailyTable()`）。
