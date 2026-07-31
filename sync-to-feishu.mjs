@@ -1,13 +1,25 @@
 // Postgres → 飞书多维表格 单向同步。Postgres 为权威库；飞书是给仪表盘用的镜像。
-// 策略：全量替换。每次同步先清空整表，再灌入（窗口表=近 N 天按日期倒序；配置表=全部）。
-//   · 飞书单表有行数上限（本项目 2 万/表）→ 只镜像近 N 天，Postgres 保全量。
-//   · 清空再灌 → 飞书表 = Postgres 近 N 天，无历史残留、无重复；天然幂等。
-//   · 按日期倒序插入 → 万一中途超限/中断，保住的是最近的数据（由近及远）。
+//
+// 策略（2026-07-31 起改为**增量窗口更新**，此前是全量替换）：
+//   · 窗口表(windowed=true)：只删飞书里 date_num 落在 [from,to] 的行、再灌入同窗口的新数据。
+//     **窗口外的历史行原样保留** → 飞书表逐日累积，比 Postgres 的抓取窗口(30 天)看得更长。
+//     幂等：同一窗口重复同步 = 删掉再灌回同一批，结果一致。
+//   · 配置表(windowed=false)：无日期维度、快照语义（阶段定义/分组/留存汇总）→ 仍全量替换。
+//
+// ⚠️ 飞书单表 2 万行硬限（本 tenant）。增量累积迟早顶到，故加容量守卫：灌入前估算
+//   现存行数 − 本窗口将删除数 + 本次要灌入数，超过 FEISHU.maxRows(默认 19000) 就按 date_num
+//   升序裁掉最旧的行腾地方，并打日志说明裁了多少。这是被平台上限逼出来的，不是业务上想删历史；
+//   要多留历史就调高 FEISHU_MAX_ROWS(≤20000)，或降低该表的行密度。
+//
 // 单个表失败不影响其它表；有任一失败则退出码非 0（cron 里 pull-all 已完成，主库不受影响）。
 // 用法：node sync-to-feishu.mjs [天数]   （默认 FEISHU_SYNC_DAYS）
+//   一次性回补历史：node sync-to-feishu.mjs 90 → 把近 90 天灌进飞书（受 2 万行上限约束）。
 import { query, end } from "./lib/db.mjs";
-import { tableIdMap, batchCreate, batchDelete, listAllRecordIds } from "./lib/feishu.mjs";
-import { buildTables } from "./feishu-tables.mjs";
+import {
+  tableIdMap, batchCreate, batchDelete, listAllRecordIds,
+  searchRecordIdsByDateNum, countRecords, oldestRecordIds, dateNum,
+} from "./lib/feishu.mjs";
+import { buildTables, DATE_NUM_FIELD } from "./feishu-tables.mjs";
 import { FEISHU } from "./config.mjs";
 
 function windowDates(days) {
@@ -28,13 +40,33 @@ async function syncTable(t, ids, win) {
   const { rows } = await query(text, params);
   const records = rows.map((r) => t.toFields(r));
 
-  // 2) 清空整表（先删后灌，腾出行数配额；避免旧窗口数据残留）
-  const old = await listAllRecordIds(tableId);
-  const deleted = await batchDelete(tableId, old);
+  // 2) 无日期维度的表 → 全量替换。两类：
+  //    · 配置表(windowed=false)：阶段定义/分组/留存汇总，快照语义。
+  //    · 汇总表(windowed=true 但没有 date_num)：AI公会汇总/分端汇总/PWA渠道汇总——它们是把整个
+  //      窗口聚合成几行「近7天/近30天」口径，行本身不带日期，累积就会变成重复行。
+  //    靠「有没有 date_num 字段」自动判定，新增汇总表不用改这里。
+  const incremental = t.windowed && t.fields.some((f) => f.field_name === DATE_NUM_FIELD);
+  if (!incremental) {
+    const deleted = await batchDelete(tableId, await listAllRecordIds(tableId));
+    const created = await batchCreate(tableId, records);
+    return { mode: t.windowed ? "全量替换(汇总)" : "全量替换", deleted, created, total: rows.length, trimmed: 0 };
+  }
 
-  // 3) 灌入（最新在前）
+  // 3) 明细表：只删本窗口的行，窗口外历史保留
+  const fromNum = dateNum(win.from), toNum = dateNum(win.to);
+  const before = await countRecords(tableId);
+  const stale = await searchRecordIdsByDateNum(tableId, DATE_NUM_FIELD, fromNum, toNum);
+  const deleted = await batchDelete(tableId, stale);
+
+  // 4) 容量守卫：删完窗口后剩多少 + 这次要灌多少 > 上限 → 裁最旧的腾地方
+  let trimmed = 0;
+  const projected = before - deleted + records.length;
+  if (projected > FEISHU.maxRows) {
+    trimmed = await batchDelete(tableId, await oldestRecordIds(tableId, DATE_NUM_FIELD, projected - FEISHU.maxRows));
+  }
+
   const created = await batchCreate(tableId, records);
-  return { deleted, created, total: rows.length };
+  return { mode: "窗口更新", deleted, created, total: rows.length, trimmed, after: before - deleted - trimmed + created };
 }
 
 async function main() {
@@ -44,22 +76,30 @@ async function main() {
   }
   const days = Number(process.argv[2]) || FEISHU.syncDays;
   const win = windowDates(days);
-  console.log(`[飞书同步] 全量替换 · 窗口 ${win.from} ~ ${win.to}（${days} 天）· campaign 粒度=${FEISHU.campaignGrain}`);
+  console.log(`[飞书同步] 增量窗口更新 · 窗口 ${win.from} ~ ${win.to}（${days} 天，窗口外历史保留）· 单表上限 ${FEISHU.maxRows} · campaign 粒度=${FEISHU.campaignGrain}`);
 
   const TABLES = await buildTables(); // 派生表账户/系列从 ad_groups 动态解析
   const ids = await tableIdMap();
   let failed = 0;
+  const trimmedTables = [];
   for (const t of TABLES) {
     try {
-      const { deleted, created, total } = await syncTable(t, ids, win);
-      const warn = created < total ? ` ⚠️ 仅灌 ${created}/${total}（疑似超表上限）` : "";
-      console.log(`  ✅ ${t.name}：清 ${deleted} · 灌 ${created}${warn}`);
+      const r = await syncTable(t, ids, win);
+      const warn = r.created < r.total ? ` ⚠️ 仅灌 ${r.created}/${r.total}（疑似超表上限）` : "";
+      const trim = r.trimmed ? ` · ⚠️ 裁最旧 ${r.trimmed} 行（顶到 ${FEISHU.maxRows} 上限）` : "";
+      const tail = r.mode === "窗口更新" ? ` · 表内共 ${r.after}` : "";
+      console.log(`  ✅ ${t.name}（${r.mode}）：删窗口 ${r.deleted} · 灌 ${r.created}${tail}${trim}${warn}`);
+      if (r.trimmed) trimmedTables.push(t.name);
     } catch (e) {
       failed++;
       console.error(`  ❌ ${t.name}：${e.message}`);
     }
   }
   console.log(`[飞书同步] 完成，${TABLES.length - failed}/${TABLES.length} 张表成功。`);
+  if (trimmedTables.length) {
+    console.log(`⚠️ 已达行数上限、被裁掉最旧数据的表：${trimmedTables.join("、")}`);
+    console.log(`   要多留历史：调高 FEISHU_MAX_ROWS（≤20000），或降低这些表的行密度。`);
+  }
   if (failed) process.exitCode = 1;
 }
 

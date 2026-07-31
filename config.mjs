@@ -36,8 +36,12 @@ export const FEISHU = {
   appId: env.FEISHU_APP_ID || "",           // 自建应用 App ID
   appSecret: env.FEISHU_APP_SECRET || "",   // 自建应用 App Secret
   appToken: env.FEISHU_APP_TOKEN || "",     // 目标多维表格（Base）的 app_token
-  // 同步窗口：只镜像最近 N 天到飞书（Postgres 保全量历史）。飞书单表有行数上限（本项目 2 万/表），窗口越小越稳。
+  // 同步窗口：每次只**更新**最近 N 天（窗口外的历史行保留在飞书，不删）。Postgres 仍是全量权威库。
   syncDays: Number(env.FEISHU_SYNC_DAYS || 30),
+  // 飞书单表行数上限（本 tenant 2 万硬限）。留一档余量做安全线：增量累积顶到这条线时，
+  // 同步会自动裁掉最旧的行腾地方（并打日志说明裁了多少、裁到哪天），避免 1254103 RecordExceedLimit
+  // 直接把同步打挂。想多留历史就把这个值调高（≤20000），或改小 syncDays 降低单次写入量。
+  maxRows: Number(env.FEISHU_MAX_ROWS || 19000),
   // campaign_daily 粒度：campaign（按系列聚合，行数少，默认）| adset（含广告组明细，行数多）。
   campaignGrain: (env.FEISHU_CAMPAIGN_GRAIN || "campaign").toLowerCase() === "adset" ? "adset" : "campaign",
 };

@@ -40,6 +40,12 @@ const campaignFields = [
   { field_name: "点击", type: FT.NUMBER },
 ];
 
+// ⚠️ SQL 里必须带白名单过滤（`acc` 子查询）。近 30 天窗口内 fetch-snapshot 已按白名单清过库，
+// 看起来加不加都一样；但**回补历史时差别巨大**：30 天窗口之外的 campaign_daily 还留着白名单启用
+// 之前的全量数据——5/03~7/01 就有 141 个别产品账户(ROMI/LUMA/KIRA…)的 17227 行、$231 万花费。
+// 不过滤的话一回补就把这些噪音灌进飞书，既撑爆行数上限、又污染看板。
+// 范围 = 账户白名单 ∪ 系列白名单（与 fetch-snapshot 的抓取范围同语义）：AI公会那个账户
+// (省广_AI工会_web_1_wcx_0630) 只在系列白名单里，只按账户过滤会把它整个漏掉。
 const campaignTable = {
   key: "campaign_daily",
   name: "广告投放日报",
@@ -48,20 +54,26 @@ const campaignTable = {
   sql: (from, to) =>
     adsetGrain
       ? {
-          text: `SELECT to_char(date,'YYYY-MM-DD') AS date, account_id, account_name, channel,
+          text: `WITH acc AS (SELECT value FROM xmp_fetch_config WHERE category='account' AND enabled),
+                       camp AS (SELECT value FROM xmp_fetch_config WHERE category='campaign' AND enabled)
+                  SELECT to_char(date,'YYYY-MM-DD') AS date, account_id, account_name, channel,
                          campaign_id, campaign_name, adset_id, adset_name,
                          cost::float8 AS cost, impression, click
                   FROM campaign_daily WHERE date BETWEEN $1 AND $2
                     AND (cost > 0 OR impression > 0 OR click > 0)
+                    AND (account_id IN (SELECT value FROM acc) OR campaign_id IN (SELECT value FROM camp))
                   ORDER BY date DESC`,
           params: [from, to],
         }
       : {
-          text: `SELECT to_char(date,'YYYY-MM-DD') AS date, account_id, MAX(account_name) AS account_name, channel,
+          text: `WITH acc AS (SELECT value FROM xmp_fetch_config WHERE category='account' AND enabled),
+                       camp AS (SELECT value FROM xmp_fetch_config WHERE category='campaign' AND enabled)
+                  SELECT to_char(date,'YYYY-MM-DD') AS date, account_id, MAX(account_name) AS account_name, channel,
                          campaign_id, MAX(campaign_name) AS campaign_name,
                          SUM(cost)::float8 AS cost, SUM(impression)::bigint AS impression, SUM(click)::bigint AS click
                   FROM campaign_daily WHERE date BETWEEN $1 AND $2
                     AND (cost > 0 OR impression > 0 OR click > 0)
+                    AND (account_id IN (SELECT value FROM acc) OR campaign_id IN (SELECT value FROM camp))
                   GROUP BY date, account_id, channel, campaign_id
                   ORDER BY date DESC`,
           params: [from, to],
