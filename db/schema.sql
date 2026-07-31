@@ -320,3 +320,21 @@ CREATE TABLE IF NOT EXISTS key_metric_daily (
 CREATE INDEX IF NOT EXISTS key_metric_daily_date_idx   ON key_metric_daily (date);
 CREATE INDEX IF NOT EXISTS key_metric_daily_region_idx ON key_metric_daily (region, date);
 
+
+
+-- ========== dms_metric_daily：自有后台业务库口径的关键指标（date × metric_key -> 数值）==========
+-- 来源 = 阿里云 DMS 只读接口查 archat 库（fetch-dms.mjs），按 **America/Chicago 日**切，与
+-- key_metric_daily 同一天界，可直接并排比较。
+--   ig_bind  = user_common_task  task_id='110' AND status='FINISHED'（按 update_at 完成时间）
+--   chengcai = user_withdraw_task amount='25'（按 create_at 申请时间，含各种 status）
+-- 为什么单独一张表而不并进 key_metric_daily：**业务库拿不到地区维度**——user_geo_location.province
+-- 脏（大量字面量 '0'、城市名混进州名、运营商名进 city），zip_code 只有 16% 覆盖 → 德州拆分只能靠
+-- BytePlus。故本表**无 region 列**，只提供全量口径；看板里全量行优先用它，德州/非德州行仍走 BytePlus。
+CREATE TABLE IF NOT EXISTS dms_metric_daily (
+  date       date        NOT NULL,
+  metric_key text        NOT NULL,
+  count      bigint      NOT NULL DEFAULT 0,
+  updated_at timestamptz NOT NULL DEFAULT now(),
+  PRIMARY KEY (date, metric_key)
+);
+CREATE INDEX IF NOT EXISTS dms_metric_daily_date_idx ON dms_metric_daily (date);

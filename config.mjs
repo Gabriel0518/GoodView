@@ -24,8 +24,18 @@ export const BYTEPLUS = {
   timezone: env.BYTEPLUS_TIMEZONE || "Asia/Shanghai",
 };
 
-export const SETTINGS = {
-  defaultLookbackDays: Number(env.PULL_DEFAULT_DAYS || 30), // 默认拉最近 N 个完整日（不含今天）
+// 自有后台业务库（阿里云 DMS 只读 SQL 接口，库名 archat）。
+// 用途：IG绑定/成材 改用业务库的真实记录（比前端埋点准）；见 fetch-dms.mjs 与 lib/dms.mjs。
+// 未配 token 时 fetch-dms 直接跳过，看板自动回退到 BytePlus 口径，不阻断主流程。
+export const DMS = {
+  endpoint: env.DMS_ENDPOINT || "https://admin-api-prod.sitin.ai/api/open/aliyun-dms/run",
+  token: env.DMS_TOKEN || "",
+  // 业务库时区是 UTC（timestamp without time zone 存的 UTC 裸时间）；关键指标按德州本地日切，
+  // 两者必须对齐，否则日界差 5~6 小时。实测对齐后 IG绑定 与 BytePlus 逐日几乎完全一致。
+  dbTimezone: env.DMS_DB_TIMEZONE || "UTC",
+};
+
+export const SETTINGS = {  defaultLookbackDays: Number(env.PULL_DEFAULT_DAYS || 30), // 默认拉最近 N 个完整日（不含今天）
   currency: env.CURRENCY || "USD",
 };
 

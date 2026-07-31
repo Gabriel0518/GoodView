@@ -294,3 +294,65 @@ XMP 的 `geo` 维度**只到国家**（PWA 账户全部返回 `US`，2026-07-30 
 全美投放的系列同样会带来德州用户（7/21 之前德州系列还没开，德州注册却一直有）。所以
 「德州系列注册单价」偏低（分母含非德州系列带来的德州用户）；要估德州总成本，用
 `PWA全部花费 × 德州注册占比%`。落地表：飞书「德州近30日统计」`tblrILGMDezTT9CG`（`txDailyTable()`）。
+
+---
+
+## 12. 自有后台业务库（DMS）—— 2026-07-31 新增
+
+`admin-api-prod.sitin.ai/api/open/aliyun-dms/run`（Bearer token，body `{"sql":"..."}`，**只放行 SELECT**）。
+库名 **`archat`**（实例上唯一业务库），839 张表，是 sitin / PWA 产品的后台。
+
+### 12.1 接口坑（实测）
+
+- 返回列名在 `data.columns`、值的键却是 `c0/c1/...`，要自己映射（`lib/dms.mjs` 的 `query()` 已做）。
+- **SQL 出错时 `success` 仍是 `true`**，错误在 `data.error` → 不能只看 success。
+- 别用 `day` 等保留字做列别名 → `syntax error at or near "day"`。
+- `task_id` / `amount` 等列是 **varchar**，跟数字比会报 `operator does not exist: character varying = integer`
+  → 字面量一律写字符串 `'110'` / `'25'`。
+- 时间列是 `timestamp without time zone`、存 **UTC 裸时间**。按目标时区切日必须写
+  `(ts AT TIME ZONE 'UTC') AT TIME ZONE '<目标时区>'`；**只写后半段是把裸时间当成目标时区，方向反了**
+  （实测写反后 7/28 IG绑定=45，写对=58，正好等于 BytePlus）。
+
+### 12.2 关键表与口径映射
+
+| 看板指标 | 业务库来源 | 状态 |
+|---|---|---|
+| **IG绑定** | `user_common_task` `task_id='110' AND status='FINISHED'`（按 `update_at`） | ✅ 已切换 |
+| **成材** | `user_withdraw_task` `amount='25'`（按 `create_at`，不筛 status） | ✅ 已切换 |
+| 注册 | `userinfo` `app_name='3'`（按 `created_at`） | ⚠️ 口径不同，未切换 |
+| 可分发 | `pwa_distribution` | 未接 |
+| 渠道来源 | `userinfo.user_source` | 取值同 BytePlus，覆盖率同样只有 ~70% |
+| 投广页曝光 / 安装成功 | — | ❌ 纯前端埋点，库里没有 |
+| 德州细分 | — | ❌ 数据质量不可用（见 12.4） |
+
+**`app_name` 是数字枚举**，映射在 `app_meta_info`（romi=14 / luma=13 / doni=11 / kira=21,23 / mora=27 / gracechat=4 …）。
+**`app_name='3'` = PWA 产品**（映射表里没登记，靠数据反推确认）：它是唯一存邮箱的 app（88.8%，其余全 0%），
+且 IG绑定 与 BytePlus 逐日几乎完全一致。
+
+### 12.3 对数结果（2026-07-31 校验，America/Chicago 日切）
+
+```
+IG绑定  DMS 34/29/25/43/58/64/63  vs BytePlus 34/28/25/43/58/62/63   ← 几乎逐日相同
+成材    DMS 11/ 9/14/70/42/26/21  vs BytePlus  7/ 9/ 7/75/44/28/22   ← 同量级同走势
+注册    DMS 133/150/154/179/219/270/267 vs BytePlus 312/302/294/296/322/334/306  ← 差 ~32%
+```
+
+注册差异**不是 bug**：BytePlus 的「注册」是 `pwa_conv_cash_ready_pop_show`（0.5 刀提现弹窗曝光），
+业务库是 `userinfo` 建行时间，两者是漏斗上不同的点。要切换需先跟业务确认以哪个为准。
+
+### 12.4 为什么德州拆分只能留在 BytePlus
+
+- `user_geo_location` 覆盖率 99.9% 但**值是脏的**：`province` 最大一档是字面量 `'0'`（7/28 起 11682 行），
+  城市名混进州名列（`Houston` 实际属德州 → 会漏算），运营商名进 `city`（`T-Mobile USA, Inc.`），
+  还有中文城市（无锡市）。
+- `userinfo.zip_code` 只有 **15.9%** 覆盖（美国邮编本可确定性映射到州，可惜数据太少）。
+- → 德州/非德州仍由 BytePlus 的 `loc_province_id` 提供。
+
+### 12.5 落地
+
+`lib/dms.mjs`（客户端 + `dayExpr()` 时区转换）· `fetch-dms.mjs`（`npm run pull:dms`，已接进 `pull-all`）
+→ Postgres `dms_metric_daily(date, metric_key, count)`（**无 region 列**，只有全量口径）。
+
+飞书「关键指标日报」：**全量行**的 IG绑定/成材 用业务库，**德州/非德州行**仍用 BytePlus，
+靠「IG/成材来源」列标明。副作用：这两个指标上 德州+非德州 与 全量 会对不齐（换源差），
+要同源比较就看德州/非德州两行。DMS 缺数时自动回退 BytePlus（SQL 里 `COALESCE`）。

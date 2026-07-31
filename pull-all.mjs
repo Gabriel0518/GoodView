@@ -61,6 +61,11 @@ async function main() {
   const aiOsCode = await run("node", ["fetch-aiguild-os.mjs"]);
   if (aiOsCode !== 0) console.warn(`  ⚠️ AI公会分端拉取返回 ${aiOsCode}（不影响主流程）`);
 
+  // 自有后台业务库(DMS)：IG绑定/成材 的真实业务记录，写 dms_metric_daily，供「关键指标日报」全量行。
+  // 未配 DMS_TOKEN 时脚本自己跳过；失败不影响主库/退出码（看板回退 BytePlus 口径）。
+  const dmsCode = await run("node", ["fetch-dms.mjs", ...daysArg]);
+  if (dmsCode !== 0) console.warn(`  ⚠️ 业务库拉取返回 ${dmsCode}（不影响主流程，看板回退 BytePlus）`);
+
   // 关键指标 × 地区(德州/非德州/全量)——写 key_metric_daily，供「关键指标日报」。
   // 官方关键指标口径（lib/key-metrics.mjs），与 funnel 各存一份，失败不影响主库/退出码。
   const kmCode = await run("node", ["fetch-key-metrics.mjs", ...daysArg]);

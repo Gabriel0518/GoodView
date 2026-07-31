@@ -711,6 +711,13 @@ const retentionChengcai = retentionTable("retention_chengcai", "成材女留存"
 //    成本，用 全量消耗 × 德州注册占比（见「德州近30日统计」表）。
 // ⚠️ 转化锚 America/Chicago（德州本地，对齐官方看板），花费锚 XMP 账户时区（上海/香港），两者差约
 //    13 小时 → 单价是近似值。见 lib/key-metrics.mjs KEY_METRIC_TIMEZONE。
+//
+// 【IG绑定 / 成材 改用业务库(DMS)，2026-07-31 用户拍板】：这两个在自有后台是**真实业务记录**
+//   （任务完成行 / 提现申请行），比前端埋点准，也不会像 BytePlus 那样因用户属性回溯变动而漂移。
+//   但业务库**切不了德州**（geo 列脏、zip 只有 16% 覆盖）→ 只有【全量】行用 DMS，
+//   德州/非德州行仍是 BytePlus。「IG/成材来源」列标明每行用的是哪个源，别看串。
+//   副作用：全量行换源后，德州+非德州 与 全量 在这两个指标上会对不齐（本来就有跨州重算的小差，
+//   现在多一层换源差）。要同源比较就看德州/非德州两行。
 const keyMetricTable = (guildCampaigns) => ({
   key: "key_metric_daily",
   name: "关键指标日报",
@@ -734,6 +741,7 @@ const keyMetricTable = (guildCampaigns) => ({
     { field_name: "IG绑定率%(IG/注册)", type: FT.NUMBER },
     { field_name: "成材率%(成材/注册)", type: FT.NUMBER },
     { field_name: "注册单价", type: FT.NUMBER },
+    { field_name: "IG/成材来源", type: FT.SINGLE_SELECT, property: { options: [{ name: "业务库(DMS)", color: 2 }, { name: "BytePlus", color: 4 }] } },
   ],
   sql: (from, to) => ({
     text: `
@@ -765,13 +773,20 @@ const keyMetricTable = (guildCampaigns) => ({
          GROUP BY date
       )
       SELECT to_char(km.date,'YYYY-MM-DD') AS date, km.region,
-             km.lp_show, km.install_success, km.register, km.distributable, km.ig_bind, km.chengcai,
+             km.lp_show, km.install_success, km.register, km.distributable,
+             -- 全量行优先用业务库(DMS)的真实记录；DMS 缺数则回退 BytePlus。地区行只能用 BytePlus。
+             (CASE WHEN km.region = 'all' THEN COALESCE(d_ig.count, km.ig_bind)   ELSE km.ig_bind  END) AS ig_bind,
+             (CASE WHEN km.region = 'all' THEN COALESCE(d_cc.count, km.chengcai)  ELSE km.chengcai END) AS chengcai,
+             (km.region = 'all' AND d_ig.count IS NOT NULL) AS from_dms,
              (CASE km.region
                 WHEN 'TX'    THEN COALESCE(sp.tx_cost, 0)
                 WHEN 'nonTX' THEN COALESCE(sp.all_cost, 0) - COALESCE(sp.tx_cost, 0)
                 ELSE              COALESCE(sp.all_cost, 0)
               END)::float8 AS cost
-        FROM km LEFT JOIN sp ON sp.date = km.date
+        FROM km
+        LEFT JOIN sp ON sp.date = km.date
+        LEFT JOIN dms_metric_daily d_ig ON d_ig.date = km.date AND d_ig.metric_key = 'ig_bind'
+        LEFT JOIN dms_metric_daily d_cc ON d_cc.date = km.date AND d_cc.metric_key = 'chengcai'
        ORDER BY km.date DESC, km.region`,
     params: [from, to, TX_CAMPAIGN_PATTERN, guildCampaigns],
   }),
@@ -787,6 +802,7 @@ const keyMetricTable = (guildCampaigns) => ({
       广告消耗: cost,
       投广页曝光: lp, 安装成功: inst, 用户注册: reg,
       可分发用户: dist, IG绑定用户: ig, "成材用户(次数)": cc,
+      "IG/成材来源": r.from_dms ? "业务库(DMS)" : "BytePlus",
     };
     // 分母为 0 的率留空（不写 0），避免"0%"被读成真的没转化
     const rate = (a, b) => (b > 0 ? Math.round((a / b) * 10000) / 100 : undefined);
