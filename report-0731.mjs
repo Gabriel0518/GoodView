@@ -46,7 +46,7 @@ const { rows: af } = await query(
   `SELECT event_name, count(DISTINCT customer_user_id) AS uids, count(*) AS n
      FROM af_events
     WHERE app_id='whisper.smart.reply'
-      AND ((event_time AT TIME ZONE 'UTC') AT TIME ZONE 'America/Chicago')::date = $1
+      AND (event_time AT TIME ZONE 'America/Chicago')::date = $1
     GROUP BY event_name`, [D]);
 const afm = Object.fromEntries(af.map((r) => [r.event_name, { uids: Number(r.uids), n: Number(r.n) }]));
 

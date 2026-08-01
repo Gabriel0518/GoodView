@@ -1009,7 +1009,10 @@ const tripleDailyTable = (guildCampaigns) => ({
                 MAX(count) FILTER (WHERE metric_key='ig_bind')  AS ig,
                 MAX(count) FILTER (WHERE metric_key='ig_auth')  AS auth
               FROM key_metric_daily WHERE date BETWEEN $1 - 1 AND $2 GROUP BY date, region),
-      af AS (SELECT ((event_time AT TIME ZONE 'UTC') AT TIME ZONE 'America/Chicago')::date AS date,
+      -- ⚠️ af_events.event_time 是 timestamptz → 转本地日只能写一次 AT TIME ZONE。
+      -- 别照抄业务库(DMS)那套双重转换（那是给 timestamp without time zone 用的），
+      -- 对 timestamptz 用双重转换会把日界整体推后 10 小时（踩过：SmartReply 的 7/31 混进了 7/30 的量）。
+      af AS (SELECT (event_time AT TIME ZONE 'America/Chicago')::date AS date,
                 count(DISTINCT customer_user_id) FILTER (WHERE event_name='af_login_success')      AS reg,
                 count(DISTINCT customer_user_id) FILTER (WHERE event_name='af_complete_ins_task')  AS ig
               FROM af_events WHERE app_id='whisper.smart.reply' GROUP BY 1),
