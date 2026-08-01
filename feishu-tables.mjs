@@ -960,17 +960,30 @@ const tripleDailyTable = (guildCampaigns) => ({
     { field_name: "广告消耗", type: FT.NUMBER },
     { field_name: "注册数", type: FT.NUMBER },
     { field_name: "注册单价", type: FT.NUMBER },
+    { field_name: "IG授权数", type: FT.NUMBER },
+    { field_name: "授权单价", type: FT.NUMBER },
     { field_name: "IG绑定数", type: FT.NUMBER },
     { field_name: "IG绑定单价", type: FT.NUMBER },
     { field_name: "安装数", type: FT.NUMBER },
     { field_name: "安装单价", type: FT.NUMBER },
+    // 环比 = (当日 − 前一日) / 前一日 × 100%。前一日为 0 或无数据时留空（不写 0，避免"持平"误读）。
+    { field_name: "消耗环比%", type: FT.NUMBER },
+    { field_name: "注册数环比%", type: FT.NUMBER },
+    { field_name: "注册单价环比%", type: FT.NUMBER },
+    { field_name: "IG授权数环比%", type: FT.NUMBER },
+    { field_name: "授权单价环比%", type: FT.NUMBER },
+    { field_name: "IG绑定数环比%", type: FT.NUMBER },
+    { field_name: "IG绑定单价环比%", type: FT.NUMBER },
+    { field_name: "安装数环比%", type: FT.NUMBER },
+    { field_name: "安装单价环比%", type: FT.NUMBER },
     { field_name: "注册数(含回访)", type: FT.NUMBER },
     { field_name: "建号数(未完善)", type: FT.NUMBER },
     { field_name: "数据来源", type: FT.TEXT },
   ],
   sql: (from, to) => ({
     text: `
-      WITH dd AS (SELECT generate_series($1::date,$2::date,'1 day')::date AS dt),
+      -- 多往前取 1 天用于算环比，最后再裁掉（prev 行本身不输出）
+      WITH dd AS (SELECT generate_series($1::date - 1,$2::date,'1 day')::date AS dt),
       acc AS (SELECT value FROM xmp_fetch_config WHERE category='account' AND enabled
                 AND (group_name IS NULL OR NOT (${APP_GROUP_SQL}))),
       app AS (SELECT value FROM xmp_fetch_config WHERE category='account' AND enabled AND ${APP_GROUP_SQL}),
@@ -982,45 +995,63 @@ const tripleDailyTable = (guildCampaigns) => ({
                                             AND campaign_id <> ALL($4::text[])
                                             AND campaign_name ~* $3),0)::float8 AS tx,
                COALESCE(SUM(cost) FILTER (WHERE account_id IN (SELECT value FROM app)),0)::float8 AS sr
-          FROM campaign_daily WHERE date BETWEEN $1 AND $2 GROUP BY date),
+          FROM campaign_daily WHERE date BETWEEN $1 - 1 AND $2 GROUP BY date),
       inst AS (SELECT date, COALESCE(SUM(value),0)::float8 AS n FROM campaign_metric_daily
-                WHERE metric_key='conversion' AND date BETWEEN $1 AND $2
+                WHERE metric_key='conversion' AND date BETWEEN $1 - 1 AND $2
                   AND account_id IN (SELECT value FROM app) GROUP BY date),
       dms AS (SELECT date,
                 MAX(count) FILTER (WHERE metric_key='register')     AS reg,
                 MAX(count) FILTER (WHERE metric_key='register_all') AS reg_all,
                 MAX(count) FILTER (WHERE metric_key='ig_bind')      AS ig
-              FROM dms_metric_daily WHERE date BETWEEN $1 AND $2 GROUP BY date),
+              FROM dms_metric_daily WHERE date BETWEEN $1 - 1 AND $2 GROUP BY date),
       bp AS (SELECT date, region,
                 MAX(count) FILTER (WHERE metric_key='register') AS reg,
-                MAX(count) FILTER (WHERE metric_key='ig_bind')  AS ig
-              FROM key_metric_daily WHERE date BETWEEN $1 AND $2 GROUP BY date, region),
+                MAX(count) FILTER (WHERE metric_key='ig_bind')  AS ig,
+                MAX(count) FILTER (WHERE metric_key='ig_auth')  AS auth
+              FROM key_metric_daily WHERE date BETWEEN $1 - 1 AND $2 GROUP BY date, region),
       af AS (SELECT ((event_time AT TIME ZONE 'UTC') AT TIME ZONE 'America/Chicago')::date AS date,
                 count(DISTINCT customer_user_id) FILTER (WHERE event_name='af_login_success')      AS reg,
                 count(DISTINCT customer_user_id) FILTER (WHERE event_name='af_complete_ins_task')  AS ig
-              FROM af_events WHERE app_id='whisper.smart.reply' GROUP BY 1)
-      SELECT to_char(dd.dt,'YYYY-MM-DD') AS date, x.seg, x.so,
-             x.cost::float8 AS cost, x.reg::bigint AS reg, x.ig::bigint AS ig,
-             x.installs::float8 AS installs, x.reg_bp::bigint AS reg_bp, x.shell::bigint AS shell, x.src
+              FROM af_events WHERE app_id='whisper.smart.reply' GROUP BY 1),
+      base AS (
+      SELECT dd.dt AS date, x.seg, x.so,
+             x.cost::float8 AS cost, x.reg::bigint AS reg, x.ig::bigint AS ig, x.auth::bigint AS auth,
+             x.installs::float8 AS installs, x.reg_bp::bigint AS reg_bp, x.shell::bigint AS shell, x.src,
+             -- 前一日各项（同口径），供算环比
+             LAG(x.cost::float8)   OVER w AS p_cost,
+             LAG(x.reg::bigint)    OVER w AS p_reg,
+             LAG(x.ig::bigint)     OVER w AS p_ig,
+             LAG(x.auth::bigint)   OVER w AS p_auth,
+             LAG(x.installs::float8) OVER w AS p_inst
         FROM dd
         LEFT JOIN spend s ON s.date=dd.dt
         LEFT JOIN inst  i ON i.date=dd.dt
         LEFT JOIN dms   m ON m.date=dd.dt
         LEFT JOIN af    a ON a.date=dd.dt
         LEFT JOIN LATERAL (VALUES
+          -- IG授权(SOP口径 Ins授权回调·授权成功) 只有 BytePlus 有；业务库/AF 没有对应事件。
           ('PWA全量',    0, COALESCE(s.pwa,0), COALESCE(m.reg,0), COALESCE(m.ig,0), NULL::float8,
-             (SELECT reg FROM bp WHERE bp.date=dd.dt AND bp.region='all'),
-             GREATEST(COALESCE(m.reg_all,0)-COALESCE(m.reg,0),0), 'XMP + 业务库'),
+             (SELECT reg  FROM bp WHERE bp.date=dd.dt AND bp.region='all'),
+             GREATEST(COALESCE(m.reg_all,0)-COALESCE(m.reg,0),0),
+             (SELECT auth FROM bp WHERE bp.date=dd.dt AND bp.region='all'), 'XMP + 业务库 + BytePlus(授权)'),
           ('德州系列',   1, COALESCE(s.tx,0),
              (SELECT reg FROM bp WHERE bp.date=dd.dt AND bp.region='TX'),
              (SELECT ig  FROM bp WHERE bp.date=dd.dt AND bp.region='TX'), NULL::float8,
-             (SELECT reg FROM bp WHERE bp.date=dd.dt AND bp.region='TX'), NULL::bigint, 'XMP + BytePlus'),
+             (SELECT reg FROM bp WHERE bp.date=dd.dt AND bp.region='TX'), NULL::bigint,
+             (SELECT auth FROM bp WHERE bp.date=dd.dt AND bp.region='TX'), 'XMP + BytePlus'),
           ('SmartReply', 2, COALESCE(s.sr,0), COALESCE(a.reg,0), COALESCE(a.ig,0), COALESCE(i.n,0),
-             NULL::bigint, NULL::bigint, 'XMP + AppsFlyer')
-        ) AS x(seg, so, cost, reg, ig, installs, reg_bp, shell, src) ON TRUE
-       WHERE x.cost > 0 OR x.reg > 0 OR x.ig > 0 OR COALESCE(x.installs,0) > 0
-       ORDER BY dd.dt DESC, x.so`,
-    params: [from, to, TX_CAMPAIGN_PATTERN, guildCampaigns],
+             NULL::bigint, NULL::bigint, NULL::bigint, 'XMP + AppsFlyer')
+        ) AS x(seg, so, cost, reg, ig, installs, reg_bp, shell, auth, src) ON TRUE
+       WINDOW w AS (PARTITION BY x.seg ORDER BY dd.dt)
+      )
+      -- 过滤放在窗口之后：若在 base 里就滤掉空行，LAG 会跨过空档取到更早的日子，环比就错了
+      SELECT to_char(date,'YYYY-MM-DD') AS date, seg, so, cost, reg, ig, auth, installs,
+             reg_bp, shell, src, p_cost, p_reg, p_ig, p_auth, p_inst
+        FROM base
+       WHERE date >= $5::date
+         AND (cost > 0 OR reg > 0 OR ig > 0 OR COALESCE(auth,0) > 0 OR COALESCE(installs,0) > 0)
+       ORDER BY date DESC, so`,
+    params: [from, to, TX_CAMPAIGN_PATTERN, guildCampaigns, from],
   }),
   toFields: (r) => {
     const cost = round2(r.cost), reg = num(r.reg), ig = num(r.ig);
@@ -1031,11 +1062,38 @@ const tripleDailyTable = (guildCampaigns) => ({
     };
     const add = (k, v) => { if (v !== undefined && v !== null) f[k] = v; };
     // 单价只在当天真有花费时给，否则留空——别把"没投放"显示成 $0
-    if (cost > 0) { add("注册单价", price(cost, reg)); add("IG绑定单价", price(cost, ig)); }
-    if (r.installs !== null && r.installs !== undefined) {
-      add("安装数", num(r.installs));
-      if (cost > 0) add("安装单价", price(cost, num(r.installs)));
-    }
+    const unit = (n) => (cost > 0 ? price(cost, n) : undefined);
+    add("注册单价", unit(reg));
+    add("IG绑定单价", unit(ig));
+    const auth = r.auth === null || r.auth === undefined ? undefined : num(r.auth);
+    add("IG授权数", auth);
+    add("授权单价", auth === undefined ? undefined : unit(auth));
+    const inst = r.installs === null || r.installs === undefined ? undefined : num(r.installs);
+    add("安装数", inst);
+    add("安装单价", inst === undefined ? undefined : unit(inst));
+
+    // 环比：(今 − 昨) / 昨 × 100%。昨日为 0/缺失 → 留空（写 0 会被读成"持平"，实际是"无从比较"）。
+    const pct = (cur, prev) => {
+      if (cur === undefined || cur === null || prev === null || prev === undefined) return undefined;
+      const p = Number(prev);
+      if (!(p > 0)) return undefined;
+      return Math.round(((Number(cur) - p) / p) * 10000) / 100;
+    };
+    const pCost = r.p_cost === null || r.p_cost === undefined ? undefined : round2(r.p_cost);
+    const pReg = r.p_reg, pIg = r.p_ig, pAuth = r.p_auth;
+    const pInst = r.p_inst === null || r.p_inst === undefined ? undefined : num(r.p_inst);
+    // 单价环比要用「前日单价」比，不能拿前日的量算
+    const pUnit = (n) => (pCost > 0 && Number(n) > 0 ? pCost / Number(n) : undefined);
+    add("消耗环比%", pct(cost, pCost));
+    add("注册数环比%", pct(reg, pReg));
+    add("注册单价环比%", pct(unit(reg), pUnit(pReg)));
+    add("IG授权数环比%", pct(auth, pAuth));
+    add("授权单价环比%", auth === undefined ? undefined : pct(unit(auth), pUnit(pAuth)));
+    add("IG绑定数环比%", pct(ig, pIg));
+    add("IG绑定单价环比%", pct(unit(ig), pUnit(pIg)));
+    add("安装数环比%", inst === undefined ? undefined : pct(inst, pInst));
+    add("安装单价环比%", inst === undefined ? undefined : pct(unit(inst), pUnit(pInst)));
+
     add("注册数(含回访)", r.reg_bp === null ? undefined : num(r.reg_bp));
     add("建号数(未完善)", r.shell === null ? undefined : num(r.shell));
     return f;
