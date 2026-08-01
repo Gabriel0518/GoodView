@@ -36,6 +36,26 @@ const METRICS = [
     label: "注册",
     // 口径 = 账号建行（每人一次）。app_name='3' 就是 PWA 产品（映射表未登记，靠数据反推：
     // 它是唯一存邮箱的 app(88.8%)，且 IG绑定 与 BytePlus 逐日一致）。
+    //
+    // ⚠️ **过滤掉空壳账号**（无邮箱且无手机）——这些是"建了号但还没填资料"的用户（用户 2026-07-31 说明）。
+    // 按已定口径「注册 = 0.5刀提现弹窗曝光」，他们还没走到那一步，本就不该计入注册。
+    // 不过滤的风险很实在：2026-07-31 当天建号 860 行里 571 行是空壳（384 个集中在 UTC 02:00 一小时内，
+    // 邮箱率从常态 76~100% 掉到 32%），会把注册虚报成 ~800（完成注册实际 289）。
+    // 建号总数另存为 register_all，两个并列展示。
+    // 「有邮箱或手机」这一路口径很稳：7/25~7/31 = 38/148/179/228/255/276/289，无突刺。
+    // PWA 走 Google 登录必有邮箱，留手机是为了兼容别的登录方式。
+    sql: (from) => `SELECT ${dayExpr("created_at", TZ)} AS d, count(*) AS n
+                      FROM userinfo
+                     WHERE app_name = '3' AND created_at >= '${from}'
+                       AND ((email IS NOT NULL AND email <> '')
+                         OR (phone_number IS NOT NULL AND phone_number <> ''))
+                     GROUP BY 1 ORDER BY 1`,
+  },
+  {
+    key: "register_all",
+    label: "建号总数",
+    // 不过滤的建号总数（含"注册了但还没填资料"的空壳）。与 register 并存，看板上并列展示，
+    // 便于发现异常批量灌入（2026-07-31 那次：860 建号 vs 289 完成注册）。
     sql: (from) => `SELECT ${dayExpr("created_at", TZ)} AS d, count(*) AS n
                       FROM userinfo
                      WHERE app_name = '3' AND created_at >= '${from}'

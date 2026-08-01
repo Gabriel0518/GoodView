@@ -929,6 +929,119 @@ const txDailyTable = (guildCampaigns) => ({
   },
 });
 
+// ===== 三端投放日报（PWA全量 / 德州系列 / SmartReply 上架包 同表）=====
+// 一行 = 一天 × 一个口径，三个口径**同表并列**，方便横向比单价（用户 2026-08-01 要求「不要分开」）。
+//
+// 各口径的数据来源与边界：
+//   PWA全量    花费 = 抓取配置里非上架包账户，剔除 AI公会系列（公会有独立看板）
+//              注册/IG = 业务库 dms_metric_daily（每人一次的真实业务记录）
+//   德州系列    花费 = 系列名含 texas/德州（XMP 无州级维度，只能按系列定向切）
+//              注册/IG = BytePlus region='TX'（业务库切不了地区：geo 列脏、zip 仅 16% 覆盖）
+//   SmartReply 花费 = 归属「上架包」的账户；安装 = XMP 媒体侧回传转化数
+//              注册/IG = AppsFlyer（af_login_success / af_complete_ins_task，去重人数）
+//
+// ⚠️ **德州行与 PWA全量行不同尺度**：德州的注册是 BytePlus 日 UV（含回访，约 1.9 倍），
+//    全量行是业务库日新增（每人一次）。所以「德州注册单价」会系统性偏低。要同尺度比较，
+//    看「注册数(含回访)」这一列——三行都给了 BytePlus 口径的值。
+// ⚠️ 花费按 XMP 账户日(上海)、转化按德州本地日(芝加哥)，差 13 小时 → 当天行的转化会偏少
+//    （芝加哥那天还没过完），单价偏高，隔天看才准。
+// ⚠️ 「建号数(未完善)」= 建了号但邮箱/手机都没填的用户（还没走到注册那一步）。
+//    2026-07-31 这个数异常放大（571，常态 0~71），留列便于及时发现批量灌入。
+const APP_GROUP_SQL = "group_name ~* '上架包|smart ?reply'";
+const tripleDailyTable = (guildCampaigns) => ({
+  key: "triple_daily",
+  name: "三端投放日报",
+  windowed: true,
+  fields: [
+    { field_name: "标识", type: FT.TEXT },
+    { field_name: "日期", type: FT.DATE },
+    { field_name: "date_num", type: FT.NUMBER },
+    { field_name: "口径", type: FT.SINGLE_SELECT, property: { options: [{ name: "PWA全量", color: 1 }, { name: "德州系列", color: 3 }, { name: "SmartReply", color: 5 }] } },
+    { field_name: "广告消耗", type: FT.NUMBER },
+    { field_name: "注册数", type: FT.NUMBER },
+    { field_name: "注册单价", type: FT.NUMBER },
+    { field_name: "IG绑定数", type: FT.NUMBER },
+    { field_name: "IG绑定单价", type: FT.NUMBER },
+    { field_name: "安装数", type: FT.NUMBER },
+    { field_name: "安装单价", type: FT.NUMBER },
+    { field_name: "注册数(含回访)", type: FT.NUMBER },
+    { field_name: "建号数(未完善)", type: FT.NUMBER },
+    { field_name: "数据来源", type: FT.TEXT },
+  ],
+  sql: (from, to) => ({
+    text: `
+      WITH dd AS (SELECT generate_series($1::date,$2::date,'1 day')::date AS dt),
+      acc AS (SELECT value FROM xmp_fetch_config WHERE category='account' AND enabled
+                AND (group_name IS NULL OR NOT (${APP_GROUP_SQL}))),
+      app AS (SELECT value FROM xmp_fetch_config WHERE category='account' AND enabled AND ${APP_GROUP_SQL}),
+      spend AS (
+        SELECT date,
+               COALESCE(SUM(cost) FILTER (WHERE account_id IN (SELECT value FROM acc)
+                                            AND campaign_id <> ALL($4::text[])),0)::float8 AS pwa,
+               COALESCE(SUM(cost) FILTER (WHERE account_id IN (SELECT value FROM acc)
+                                            AND campaign_id <> ALL($4::text[])
+                                            AND campaign_name ~* $3),0)::float8 AS tx,
+               COALESCE(SUM(cost) FILTER (WHERE account_id IN (SELECT value FROM app)),0)::float8 AS sr
+          FROM campaign_daily WHERE date BETWEEN $1 AND $2 GROUP BY date),
+      inst AS (SELECT date, COALESCE(SUM(value),0)::float8 AS n FROM campaign_metric_daily
+                WHERE metric_key='conversion' AND date BETWEEN $1 AND $2
+                  AND account_id IN (SELECT value FROM app) GROUP BY date),
+      dms AS (SELECT date,
+                MAX(count) FILTER (WHERE metric_key='register')     AS reg,
+                MAX(count) FILTER (WHERE metric_key='register_all') AS reg_all,
+                MAX(count) FILTER (WHERE metric_key='ig_bind')      AS ig
+              FROM dms_metric_daily WHERE date BETWEEN $1 AND $2 GROUP BY date),
+      bp AS (SELECT date, region,
+                MAX(count) FILTER (WHERE metric_key='register') AS reg,
+                MAX(count) FILTER (WHERE metric_key='ig_bind')  AS ig
+              FROM key_metric_daily WHERE date BETWEEN $1 AND $2 GROUP BY date, region),
+      af AS (SELECT ((event_time AT TIME ZONE 'UTC') AT TIME ZONE 'America/Chicago')::date AS date,
+                count(DISTINCT customer_user_id) FILTER (WHERE event_name='af_login_success')      AS reg,
+                count(DISTINCT customer_user_id) FILTER (WHERE event_name='af_complete_ins_task')  AS ig
+              FROM af_events WHERE app_id='whisper.smart.reply' GROUP BY 1)
+      SELECT to_char(dd.dt,'YYYY-MM-DD') AS date, x.seg, x.so,
+             x.cost::float8 AS cost, x.reg::bigint AS reg, x.ig::bigint AS ig,
+             x.installs::float8 AS installs, x.reg_bp::bigint AS reg_bp, x.shell::bigint AS shell, x.src
+        FROM dd
+        LEFT JOIN spend s ON s.date=dd.dt
+        LEFT JOIN inst  i ON i.date=dd.dt
+        LEFT JOIN dms   m ON m.date=dd.dt
+        LEFT JOIN af    a ON a.date=dd.dt
+        LEFT JOIN LATERAL (VALUES
+          ('PWA全量',    0, COALESCE(s.pwa,0), COALESCE(m.reg,0), COALESCE(m.ig,0), NULL::float8,
+             (SELECT reg FROM bp WHERE bp.date=dd.dt AND bp.region='all'),
+             GREATEST(COALESCE(m.reg_all,0)-COALESCE(m.reg,0),0), 'XMP + 业务库'),
+          ('德州系列',   1, COALESCE(s.tx,0),
+             (SELECT reg FROM bp WHERE bp.date=dd.dt AND bp.region='TX'),
+             (SELECT ig  FROM bp WHERE bp.date=dd.dt AND bp.region='TX'), NULL::float8,
+             (SELECT reg FROM bp WHERE bp.date=dd.dt AND bp.region='TX'), NULL::bigint, 'XMP + BytePlus'),
+          ('SmartReply', 2, COALESCE(s.sr,0), COALESCE(a.reg,0), COALESCE(a.ig,0), COALESCE(i.n,0),
+             NULL::bigint, NULL::bigint, 'XMP + AppsFlyer')
+        ) AS x(seg, so, cost, reg, ig, installs, reg_bp, shell, src) ON TRUE
+       WHERE x.cost > 0 OR x.reg > 0 OR x.ig > 0 OR COALESCE(x.installs,0) > 0
+       ORDER BY dd.dt DESC, x.so`,
+    params: [from, to, TX_CAMPAIGN_PATTERN, guildCampaigns],
+  }),
+  toFields: (r) => {
+    const cost = round2(r.cost), reg = num(r.reg), ig = num(r.ig);
+    const f = {
+      标识: `${r.date}|${r.seg}`,
+      日期: dateMs(r.date), date_num: dateNum(r.date),
+      口径: r.seg, 广告消耗: cost, 注册数: reg, IG绑定数: ig, 数据来源: r.src,
+    };
+    const add = (k, v) => { if (v !== undefined && v !== null) f[k] = v; };
+    // 单价只在当天真有花费时给，否则留空——别把"没投放"显示成 $0
+    if (cost > 0) { add("注册单价", price(cost, reg)); add("IG绑定单价", price(cost, ig)); }
+    if (r.installs !== null && r.installs !== undefined) {
+      add("安装数", num(r.installs));
+      if (cost > 0) add("安装单价", price(cost, num(r.installs)));
+    }
+    add("注册数(含回访)", r.reg_bp === null ? undefined : num(r.reg_bp));
+    add("建号数(未完善)", r.shell === null ? undefined : num(r.shell));
+    return f;
+  },
+});
+
 // 从 ad_groups / 抓取配置解析派生看板的账户/系列集合。找不到配置时回退到写死的默认值，保证行为不变。
 //   AI公会 = 名称含「AI公会/AIguild/公会」的分组 → 展开为 campaign_id 集合（花费按系列过滤）。
 //   PWA(非公会)看板账户 = 「XMP抓取配置」里 category='account' 的账户行，自动排除拥有公会系列的账户
@@ -1033,6 +1146,7 @@ export async function buildTables() {
     pwaSummaryTable(pwaAccIds),
     appDailyTable(g.appAccounts.map((a) => a.id)),
     txDailyTable(g.aiguildCampaigns),
+    tripleDailyTable(g.aiguildCampaigns),
     keyMetricTable(g.aiguildCampaigns),
     retentionUser,
     retentionChengcai,
