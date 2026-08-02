@@ -2,7 +2,8 @@
 .env
 xmp-test.mjs
 byteplus-test.mjs
-data/
+# 只忽略根目录的本地缓存(funnel.json/snapshot.json)；不能写成 data/，那会连 app/api/data 一起误伤
+/data/
 node_modules/
 
 # Next.js
