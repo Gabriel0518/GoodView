@@ -8,7 +8,16 @@ chk() { # chk <描述> <期望http> <实际http> [额外说明]
   if [ "$2" = "$3" ]; then echo "  ✅ $1 ($3)"; ok=$((ok+1));
   else echo "  ❌ $1 期望 $2 实际 $3 $4"; fail=$((fail+1)); fi
 }
-code() { curl -s -o /tmp/r.json -w '%{http_code}' "$@"; }
+# 打远端时偶发 curl 连接失败(000)，重试 3 次再判定，避免把网络抖动当成用例失败
+code() {
+  local c
+  for _ in 1 2 3; do
+    c=$(curl -s -o /tmp/r.json -w '%{http_code}' -m 25 --retry 2 --retry-connrefused "$@")
+    [ "$c" != "000" ] && break
+    sleep 3
+  done
+  echo "$c"
+}
 
 echo "=== 鉴权 ==="
 chk "无凭证被拒"        401 "$(code $BASE/api/data)"

@@ -7,7 +7,7 @@
 ## 快速开始
 
 ```bash
-BASE=https://<你的-GoodView-域名>
+BASE=https://goodview-production.up.railway.app
 TOKEN=<DATA_API_TOKEN>
 
 # 1. 先读自述文档（端点列表 + 口径警告 + 示例）
@@ -105,7 +105,7 @@ Railway 上只需要给 **web 服务（GoodView）** 配这两个变量，`feish
 ```bash
 npm run dev                # 本地起在 7101
 ./test-data-api.sh         # 16 项：鉴权 / 文档 / schema / 正常查询 / 各类写操作必须被拒
-BASE=https://<线上域名> ./test-data-api.sh   # 也可打线上
+BASE=https://goodview-production.up.railway.app ./test-data-api.sh   # 也可打线上
 ```
 
 ---
