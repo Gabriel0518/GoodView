@@ -13,5 +13,6 @@ next-env.d.ts
 tsconfig.tsbuildinfo
 
 # 用户级导出（含 user_id/zip，不进仓库）
-top-earners-face80.csv
+top-earners-face80*.csv
+top-earners-face80*-ids.txt
 top-earners-face80-ids.txt
