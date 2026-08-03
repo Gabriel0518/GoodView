@@ -1,7 +1,7 @@
 // 账户归属核对 —— 计划搭完后跑，按 XMP 系列名判断每个账户实际投的产品，
 // 与飞书「广告账户归属」比对，列出需要改的行。同时回填缺失的账户名。
 // 用法：node check-account-group.mjs              # 只报告
-//       node check-account-group.mjs --fix-names  # 顺便把账户名回填进飞书
+//       node check-account-group.mjs --fix-names  # 顺便补**空的**账户名（不覆写已有名称，见下方注释）
 import { fetchReport } from "./lib/xmp.mjs";
 import { tableIdMap, listRecords, batchUpdate, cellStr } from "./lib/feishu.mjs";
 import { xmpConfigTable } from "./feishu-tables.mjs";
@@ -50,7 +50,10 @@ for (const rec of recs) {
   const verdict = APP_PAT.test(blob) ? "上架包" : PWA_PAT.test(blob) ? "PWA" : "未判定";
   const bad = verdict !== "未判定" && verdict !== group;
   if (bad) mismatch.push({ id, group, verdict, name: x.name, camps, record_id: rec.record_id });
-  if (x.name && cellStr(f[F.name]).trim() !== x.name) nameFix.push({ record_id: rec.record_id, fields: { [F.name]: x.name } });
+  // ⚠️ 「名称」列是分账户飞书表的表名来源（feishu-tables.mjs → pwaAccountTable(a.name, a.id)）。
+  //    覆写已有名称 = 重命名飞书表 → 同步找不到原表，历史数据变孤儿。所以只填空值，绝不覆写。
+  //    （2026-08-03 踩过：回填 6 行导致 5 张分账户表同步失败，见 restore-account-names.mjs）
+  if (x.name && !cellStr(f[F.name]).trim()) nameFix.push({ record_id: rec.record_id, fields: { [F.name]: x.name } });
 
   console.log(
     `${id.padEnd(21)} ${group.padEnd(8)} ${(bad ? "⚠️ " + verdict : verdict).padEnd(9)} ${String(x.module||"—").padEnd(8)} ${("$"+x.cost.toFixed(0)).padStart(9)}   ${camps.slice(0,2).join(" / ").slice(0,44)}`,

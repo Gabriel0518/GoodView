@@ -231,6 +231,9 @@ export const xmpConfigTable = {
     { field_name: "值", type: FT.TEXT }, // 主字段：账户ID/系列ID（或其名称）或 指标（曝光/impression）
     { field_name: "类别", type: FT.SINGLE_SELECT, property: seed(["广告账户", "广告系列", "指标"]) },
     { field_name: "名称", type: FT.TEXT }, // 可读备注（账户/系列名；指标可留空）
+    // ⚠️ 「名称」对 PWA 账户不只是备注：它是分账户飞书表的**表名**（见下方 pwaAccountTable 调用）。
+    //    改这一列 = 重命名飞书表 → 同步会报「找不到表」，原表带着历史数据变孤儿。
+    //    脚本回填账户名时只能补空值，不能覆写。（2026-08-03 踩过，见 restore-account-names.mjs）
     // 归属决定这个账户的花费算进哪个看板：PWA / AI公会 / 上架包（SmartReply）。
     // 填「上架包」的账户 → 花费只进「上架包渠道日报」，并从 PWA 口径剔除（它们的转化走 AppsFlyer
     // 不走 BytePlus，留在 PWA 看板会变成「有花费零转化」，把 PWA 单价整体抬高）。留空按 PWA 处理。
