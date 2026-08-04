@@ -48,7 +48,10 @@ for (const rec of recs) {
   const camps = [...x.camps];
   const blob = camps.join(" ") + " " + x.name;
   const verdict = APP_PAT.test(blob) ? "上架包" : PWA_PAT.test(blob) ? "PWA" : "未判定";
-  const bad = verdict !== "未判定" && verdict !== group;
+  // 归属列允许写细分值（如「上架包(Savvy)」）——与 feishu-tables 的 APP_GROUP_SQL 一致，
+  // 只要匹配上架包模式就算同类，不能用字符串全等，否则细分归属会被误报成不一致。
+  const groupCat = APP_PAT.test(group) ? "上架包" : "PWA";
+  const bad = verdict !== "未判定" && verdict !== groupCat;
   if (bad) mismatch.push({ id, group, verdict, name: x.name, camps, record_id: rec.record_id });
   // ⚠️ 「名称」列是分账户飞书表的表名来源（feishu-tables.mjs → pwaAccountTable(a.name, a.id)）。
   //    覆写已有名称 = 重命名飞书表 → 同步找不到原表，历史数据变孤儿。所以只填空值，绝不覆写。
