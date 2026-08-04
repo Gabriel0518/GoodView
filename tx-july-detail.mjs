@@ -1,16 +1,19 @@
-// 德州 · 7月收入前20% 女性用户明细导出
-// 口径：
-//   队列  = PWA(app_name=3) 女端(gender=2)，2026-07 芝加哥月内净进账 > 0，按收入降序 ntile(5)=1
-//   德州  = 档案地/邮编为主(一致率99.7%)，IP 兜底，指向他州一票否决
-//   通话  = user_call_order status='PAID' AND order_type='VIDEO_CALL'，call_duration 单位秒
-//   在线  = sp_v3_online_session.duration_ms（仅覆盖用 IG 托管的创作者，见输出末尾覆盖率）
-//   男性  = 7月与她 PAID 视频通话过的 male_user_id
-//   消费  = unified_payment_orders status IN ('SUCCESS','ACTIVE')，全平台消费非仅对她
+// 德州 · 7月收入前20% 女性用户明细
+//
+// 口径（全部实测确认，见 git log）：
+//   队列    = PWA(app_name=3) 女端(gender=2)，2026-07(芝加哥月)净进账>0，按收入降序 ntile(5)=1
+//   德州    = 档案地/邮编为主(两者一致率99.7%)，IP 兜底；档案地或邮编指向他州则一票否决
+//   通话    = user_call_order status='PAID' AND order_type='VIDEO_CALL'（MOCK_VIDEO 已排除）
+//   付费/免费 = amount>0 / amount=0（amount=0 表示落在 free_call_duration 60 秒额度内，她没赚到）
+//   在线    = sp_v3_online_session.duration_ms，按 connected_at 落在 7 月内 → 单月口径
+//   男性消费 = unified_payment_orders status IN ('SUCCESS','ACTIVE')，全平台充值非仅对她
+//   付费男性留存 = 以该男性自己的注册日为起点，第 N 日当天是否有通话记录；
+//                 分母只含「注册满 N 天」的男性，否则新注册的会把 D30 拉低
 import { queryAll, query, bool } from "./lib/dms.mjs";
 import { writeFileSync } from "node:fs";
 
 const TZ = "America/Chicago";
-const M0 = "2026-07-01", M1 = "2026-08-01";     // 7月 [M0, M1)
+const M0 = "2026-07-01", M1 = "2026-08-01";
 const ch = (c) => `((${c} AT TIME ZONE 'UTC') AT TIME ZONE '${TZ}')`;
 const TX_CITY = `^(Houston|Dallas|San Antonio|Austin|Fort Worth|El Paso|Arlington|Corpus Christi|Plano|Laredo|Lubbock|Garland|Irving|Amarillo|Brownsville|McKinney|Frisco|Killeen|Waco|Denton|Midland|Odessa|Beaumont|Round Rock|Richardson|College Station|Sugar Land|Carrollton|Pearland|Mesquite|League City|Baytown|Conroe|Edinburg|Harlingen|Galveston|San Marcos|New Braunfels)$`;
 const PREF = `btrim(u.preferred_location, '" ')`;
@@ -24,7 +27,6 @@ const IPC_TX = `EXISTS (SELECT 1 FROM user_geo_location g WHERE g.user_id=u.user
    AND (g.province IS NULL OR g.province IN ('0','')) AND g.city ~* '${TX_CITY}')`;
 const IS_TX = `((${P_TX}) OR (${Z_TX}) OR (((${IP_TX}) OR (${IPC_TX})) AND NOT ((${P_NEG}) OR (${Z_NEG}))))`;
 
-// —— 1) 队列：7月收入前20% ∩ 德州 ——
 const base = await queryAll(`
   WITH inc AS (
     SELECT h.to_user_id user_id, sum(h.balance_change::numeric) income
@@ -37,28 +39,30 @@ const base = await queryAll(`
   SELECT r.user_id, round(r.income,2) income_jul, r.rnk,
          u.face_score, u.age, u.user_source, u.preferred_location, u.zip_code,
          u.created_at::date::text reg_date,
-         (${P_TX}) s_pref, (${Z_TX}) s_zip, (${IP_TX}) s_ip, (${IPC_TX}) s_ipcity
+         (${P_TX}) s_pref, (${Z_TX}) s_zip
     FROM rk r JOIN userinfo u ON u.user_id=r.user_id
    WHERE r.q=1 AND u.deleted_at IS NULL AND ${IS_TX}`, { orderBy: "user_id" });
 
 const ids = base.map((r) => r.user_id);
 console.log(`7月收入前20% ∩ 德州：${ids.length} 人`);
-if (!ids.length) process.exit(0);
 const IN = ids.join(",");
 
-// —— 2) 通话（7月，PAID 视频通话）——
 const call = await query(`
   SELECT female_user_id uid, count(*) calls,
-         round(avg(call_duration)::numeric,1) avg_sec,
+         count(*) FILTER (WHERE COALESCE(NULLIF(amount,'')::numeric,0) > 0) paid_calls,
+         count(*) FILTER (WHERE COALESCE(NULLIF(amount,'')::numeric,0) = 0) free_calls,
+         count(*) FILTER (WHERE call_duration = 0) zero_calls,
+         round(avg(call_duration)::numeric,1) avg_all,
+         round(avg(call_duration) FILTER (WHERE call_duration > 0)::numeric,1) avg_nonzero,
+         round(avg(call_duration) FILTER (WHERE COALESCE(NULLIF(amount,'')::numeric,0) > 0)::numeric,1) avg_paid,
          sum(call_duration) total_sec,
-         count(DISTINCT male_user_id) males,
-         round(sum(NULLIF(amount,'')::numeric),2) her_earn
+         sum(call_duration) FILTER (WHERE COALESCE(NULLIF(amount,'')::numeric,0) > 0) paid_sec,
+         count(DISTINCT male_user_id) males
     FROM user_call_order
    WHERE female_user_id IN (${IN}) AND status='PAID' AND order_type='VIDEO_CALL'
      AND ${ch("create_at")} >= '${M0}' AND ${ch("create_at")} < '${M1}'
    GROUP BY 1`);
 
-// —— 3) 在线时长（7月）——
 const online = await query(`
   SELECT creator_id uid, round(sum(duration_ms)/3600000.0, 2) hours, count(*) sessions
     FROM sp_v3_online_session
@@ -66,101 +70,133 @@ const online = await query(`
      AND ${ch("connected_at")} >= '${M0}' AND ${ch("connected_at")} < '${M1}'
    GROUP BY 1`);
 
-// —— 4) 男性侧：留存 + 消费 + ARPU ——
+// 男性侧：复访 + 消费 + ARPU + 付费男性的注册留存(D1/D7/D30)
 const male = await query(`
   WITH pair AS (
-    SELECT DISTINCT female_user_id f, male_user_id m
-      FROM user_call_order
-     WHERE female_user_id IN (${IN}) AND status='PAID' AND order_type='VIDEO_CALL'
-       AND ${ch("create_at")} >= '${M0}' AND ${ch("create_at")} < '${M1}'),
-  -- 7月内复访：与同一位女性在 ≥2 个不同日期通话
-  repeat AS (
-    SELECT female_user_id f, male_user_id m
+    SELECT female_user_id f, male_user_id m,
+           count(DISTINCT ${ch("create_at")}::date) days,
+           COALESCE(sum(NULLIF(amount,'')::numeric),0) amt
       FROM user_call_order
      WHERE female_user_id IN (${IN}) AND status='PAID' AND order_type='VIDEO_CALL'
        AND ${ch("create_at")} >= '${M0}' AND ${ch("create_at")} < '${M1}'
-     GROUP BY 1,2 HAVING count(DISTINCT ${ch("create_at")}::date) >= 2),
-  -- 8月回访（截至今天，天数不足一个月，仅作参考）
+     GROUP BY 1,2),
   aug AS (
-    SELECT DISTINCT female_user_id f, male_user_id m
-      FROM user_call_order
+    SELECT DISTINCT female_user_id f, male_user_id m FROM user_call_order
      WHERE female_user_id IN (${IN}) AND status='PAID' AND order_type='VIDEO_CALL'
        AND ${ch("create_at")} >= '${M1}'),
   spend AS (
-    SELECT user_id, sum(amount::numeric) s
-      FROM unified_payment_orders
+    SELECT user_id, sum(amount::numeric) s FROM unified_payment_orders
      WHERE status IN ('SUCCESS','ACTIVE')
        AND ${ch("created_at")} >= '${M0}' AND ${ch("created_at")} < '${M1}'
-     GROUP BY 1)
+     GROUP BY 1),
+  -- 付费男性的注册日 + 各留存窗口是否已满
+  mreg AS (
+    SELECT DISTINCT p.m, ${ch("u.created_at")}::date rd
+      FROM pair p JOIN userinfo u ON u.user_id = p.m
+     WHERE p.amt > 0),
+  -- 男性活跃日 = 有通话记录的日期（男性侧最丰富的活跃信号）
+  act AS (
+    SELECT c.male_user_id m, ${ch("c.create_at")}::date d
+      FROM user_call_order c
+     WHERE c.male_user_id IN (SELECT m FROM mreg)
+     GROUP BY 1,2),
+  ret AS (
+    SELECT r.m, r.rd,
+      (r.rd + 1  <= ${ch("now()")}::date) d1_ok,
+      (r.rd + 7  <= ${ch("now()")}::date) d7_ok,
+      (r.rd + 30 <= ${ch("now()")}::date) d30_ok,
+      EXISTS (SELECT 1 FROM act a WHERE a.m=r.m AND a.d = r.rd + 1)  d1,
+      EXISTS (SELECT 1 FROM act a WHERE a.m=r.m AND a.d = r.rd + 7)  d7,
+      EXISTS (SELECT 1 FROM act a WHERE a.m=r.m AND a.d = r.rd + 30) d30
+      FROM mreg r)
   SELECT p.f uid,
          count(*) males,
-         count(*) FILTER (WHERE r.m IS NOT NULL) repeat_males,
+         count(*) FILTER (WHERE p.days>=2) repeat_males,
+         count(*) FILTER (WHERE p.amt>0) paid_males,
+         count(*) FILTER (WHERE p.amt>0 AND p.days>=2) paid_repeat,
          count(*) FILTER (WHERE a.m IS NOT NULL) aug_males,
          round(COALESCE(sum(sp.s),0),2) male_spend,
-         count(*) FILTER (WHERE sp.s IS NOT NULL) paying_males
+         count(*) FILTER (WHERE sp.s IS NOT NULL) paying_males,
+         count(*) FILTER (WHERE t.d1_ok)  d1_base, count(*) FILTER (WHERE t.d1_ok AND t.d1)  d1_ret,
+         count(*) FILTER (WHERE t.d7_ok)  d7_base, count(*) FILTER (WHERE t.d7_ok AND t.d7)  d7_ret,
+         count(*) FILTER (WHERE t.d30_ok) d30_base,count(*) FILTER (WHERE t.d30_ok AND t.d30) d30_ret
     FROM pair p
-    LEFT JOIN repeat r ON r.f=p.f AND r.m=p.m
     LEFT JOIN aug a ON a.f=p.f AND a.m=p.m
     LEFT JOIN spend sp ON sp.user_id=p.m
+    LEFT JOIN ret t ON t.m=p.m
    GROUP BY 1`);
 
-const idx = (arr, k = "uid") => Object.fromEntries(arr.map((r) => [String(r[k]), r]));
+const idx = (a) => Object.fromEntries(a.map((r) => [String(r.uid), r]));
 const C = idx(call), O = idx(online), M = idx(male);
+const pct = (a, b) => (Number(b) > 0 ? (Number(a) / Number(b) * 100).toFixed(1) + "%" : "");
+const mins = (s) => (s ? (Number(s) / 60).toFixed(1) : "");
 
-const rows = base.map((b) => {
+let rows = base.map((b) => {
   const u = String(b.user_id), c = C[u] || {}, o = O[u] || {}, m = M[u] || {};
   const males = Number(m.males || 0), spend = Number(m.male_spend || 0);
   const p = bool(b.s_pref), z = bool(b.s_zip);
   return {
     user_id: u,
-    收入排名: b.rnk,
+    全量收入排名: b.rnk,
     七月收入USD: b.income_jul,
-    face_score: b.face_score ?? "",
-    年龄: b.age ?? "",
     德州置信度: p && z ? "高" : p || z ? "中" : "低",
     档案地: (b.preferred_location || "").replace(/"/g, ""),
-    通话数: c.calls ?? 0,
-    平均每次通话秒: c.avg_sec ?? "",
-    通话总时长分钟: c.total_sec ? (Number(c.total_sec) / 60).toFixed(1) : "",
-    在线时长小时: o.hours ?? "",
-    在线会话数: o.sessions ?? "",
-    通话男性数: males,
-    男性复访数: Number(m.repeat_males || 0),
-    七月内复访率: males ? (Number(m.repeat_males || 0) / males * 100).toFixed(1) + "%" : "",
-    八月回访数: Number(m.aug_males || 0),
-    八月回访率: males ? (Number(m.aug_males || 0) / males * 100).toFixed(1) + "%" : "",
-    付费男性数: Number(m.paying_males || 0),
-    男性消费总额USD: spend.toFixed(2),
-    ARPU: males ? (spend / males).toFixed(2) : "",
+    face_score: b.face_score ?? "",
+    年龄: b.age ?? "",
     来源: b.user_source ?? "",
     注册日: b.reg_date,
+    // —— 视频通话（已排除 MOCK_VIDEO）——
+    视频总数: Number(c.calls || 0),
+    付费视频数: Number(c.paid_calls || 0),
+    免费视频数: Number(c.free_calls || 0),
+    零秒通话数: Number(c.zero_calls || 0),
+    均时长_全部秒: c.avg_all ?? "",
+    均时长_去0秒: c.avg_nonzero ?? "",
+    均时长_仅付费秒: c.avg_paid ?? "",
+    通话总时长分钟: mins(c.total_sec),
+    付费通话时长分钟: mins(c.paid_sec),
+    // —— 在线（7月单月）——
+    七月在线小时: o.hours ?? "",
+    在线会话数: o.sessions ?? "",
+    // —— 男性侧 ——
+    通话男性数: males,
+    付费男性数: Number(m.paid_males || 0),
+    男性消费总额USD: spend.toFixed(2),
+    ARPU: males ? (spend / males).toFixed(2) : "",
+    ARPPU: Number(m.paying_males) ? (spend / Number(m.paying_males)).toFixed(2) : "",
+    // —— 复访（对她本人）——
+    通话男性复访率: pct(m.repeat_males, males),
+    付费男性复访率: pct(m.paid_repeat, m.paid_males),
+    八月回访率: pct(m.aug_males, males),
+    // —— 付费男性自身的注册留存 ——
+    付费男性次日留存: pct(m.d1_ret, m.d1_base),
+    付费男性7日留存: pct(m.d7_ret, m.d7_base),
+    付费男性30日留存: pct(m.d30_ret, m.d30_base),
+    留存样本数_D30: Number(m.d30_base || 0),
   };
 });
 rows.sort((a, b) => Number(b.七月收入USD) - Number(a.七月收入USD));
+rows = rows.map((r, i) => ({ user_id: r.user_id, 德州排名: i + 1, ...r }));
 
 const hdr = Object.keys(rows[0]);
+const esc = (v) => { const s = String(v ?? ""); return /[",\n]/.test(s) ? `"${s.replace(/"/g, "")}"` : s; };
 writeFileSync("德州-7月收入前20%-明细.csv",
-  [hdr.join(","), ...rows.map((r) => hdr.map((h) => {
-    const v = String(r[h] ?? "");
-    return /[",]/.test(v) ? `"${v.replace(/"/g, "")}"` : v;
-  }).join(","))].join("\n"));
+  "﻿" + [hdr.join(","), ...rows.map((r) => hdr.map((h) => esc(r[h])).join(","))].join("\n"));
 
 const n = (f) => rows.filter(f).length;
-const avg = (f) => { const v = rows.map(f).filter((x) => Number.isFinite(x) && x > 0); return v.length ? (v.reduce((a, b) => a + b, 0) / v.length) : 0; };
-console.log(`  置信度 高 ${n((r) => r.德州置信度 === "高")} · 中 ${n((r) => r.德州置信度 === "中")} · 低 ${n((r) => r.德州置信度 === "低")}`);
-console.log(`\n覆盖率（能取到该指标的人数）：`);
-console.log(`  有通话记录        ${n((r) => r.通话数 > 0)} / ${rows.length}`);
-console.log(`  有在线会话记录    ${n((r) => r.在线时长小时 !== "")} / ${rows.length}   ← sp_v3_online_session 只覆盖用 IG 托管的创作者`);
-console.log(`  有男性消费数据    ${n((r) => Number(r.男性消费总额USD) > 0)} / ${rows.length}`);
-console.log(`\n均值（仅统计有数的人）：`);
-console.log(`  7月收入           $${avg((r) => Number(r.七月收入USD)).toFixed(2)}`);
-console.log(`  平均每次通话      ${avg((r) => Number(r.平均每次通话秒)).toFixed(1)} 秒`);
-console.log(`  在线时长          ${avg((r) => Number(r.在线时长小时)).toFixed(1)} 小时`);
-console.log(`  通话男性数        ${avg((r) => r.通话男性数).toFixed(1)} 人`);
-console.log(`  7月内复访率       ${avg((r) => parseFloat(r.七月内复访率)).toFixed(1)}%`);
-console.log(`  ARPU              $${avg((r) => Number(r.ARPU)).toFixed(2)}`);
-console.log(`\n✅ 德州-7月收入前20%-明细.csv（${rows.length} 行 × ${hdr.length} 字段）`);
-console.log(`\nTop 12：`);
-console.log("user_id     7月收入   通话数 均时长s 在线h  男性数 复访率  ARPU");
-rows.slice(0, 12).forEach((r) => console.log(
-  `  ${r.user_id.padEnd(10)}${String(r.七月收入USD).padStart(9)}${String(r.通话数).padStart(7)}${String(r.平均每次通话秒 || "—").padStart(8)}${String(r.在线时长小时 || "—").padStart(7)}${String(r.通话男性数).padStart(7)}${String(r.七月内复访率 || "—").padStart(8)}${String(r.ARPU || "—").padStart(8)}`));
+const avg = (f) => { const v = rows.map(f).filter((x) => Number.isFinite(x) && x > 0); return v.length ? v.reduce((a, b) => a + b, 0) / v.length : 0; };
+console.log(`\n覆盖率：通话 ${n((r) => r.视频总数 > 0)}/${rows.length} · 在线 ${n((r) => r.七月在线小时 !== "")}/${rows.length} · 男性消费 ${n((r) => Number(r.男性消费总额USD) > 0)}/${rows.length}`);
+console.log(`\n队列均值：`);
+console.log(`  7月收入 $${avg((r) => Number(r.七月收入USD)).toFixed(2)}`);
+console.log(`  视频数 ${avg((r) => r.视频总数).toFixed(0)}（付费 ${avg((r) => r.付费视频数).toFixed(0)} / 免费 ${avg((r) => r.免费视频数).toFixed(0)}）`);
+console.log(`  均时长  全部 ${avg((r) => Number(r.均时长_全部秒)).toFixed(1)}s · 去0秒 ${avg((r) => Number(r.均时长_去0秒)).toFixed(1)}s · 仅付费 ${avg((r) => Number(r.均时长_仅付费秒)).toFixed(1)}s`);
+console.log(`  7月在线 ${avg((r) => Number(r.七月在线小时)).toFixed(1)} 小时`);
+console.log(`  通话男性 ${avg((r) => r.通话男性数).toFixed(0)} 人 · 付费男性 ${avg((r) => r.付费男性数).toFixed(0)} 人`);
+console.log(`  ARPU $${avg((r) => Number(r.ARPU)).toFixed(2)} · ARPPU $${avg((r) => Number(r.ARPPU)).toFixed(2)}`);
+console.log(`  复访  通话男性 ${avg((r) => parseFloat(r.通话男性复访率)).toFixed(1)}% · 付费男性 ${avg((r) => parseFloat(r.付费男性复访率)).toFixed(1)}%`);
+console.log(`  付费男性注册留存  D1 ${avg((r) => parseFloat(r.付费男性次日留存)).toFixed(1)}% · D7 ${avg((r) => parseFloat(r.付费男性7日留存)).toFixed(1)}% · D30 ${avg((r) => parseFloat(r.付费男性30日留存)).toFixed(1)}%`);
+console.log(`\n✅ 德州-7月收入前20%-明细.csv（${rows.length} 行 × ${hdr.length} 字段，含 BOM 便于 Excel 打开）`);
+console.log(`\nTop 10：`);
+console.log("德州 全量  user_id     7月收入  付费视频 免费视频 均时长(付费) 在线h  付费男性  ARPU  D1/D7/D30");
+rows.slice(0, 10).forEach((r) => console.log(
+  `${String(r.德州排名).padStart(3)}${String(r.全量收入排名).padStart(5)}  ${r.user_id.padEnd(10)}${String(r.七月收入USD).padStart(9)}${String(r.付费视频数).padStart(8)}${String(r.免费视频数).padStart(8)}${String(r.均时长_仅付费秒).padStart(10)}s${String(r.七月在线小时 || "—").padStart(8)}${String(r.付费男性数).padStart(8)}${String(r.ARPU).padStart(7)}  ${r.付费男性次日留存}/${r.付费男性7日留存}/${r.付费男性30日留存}`));
