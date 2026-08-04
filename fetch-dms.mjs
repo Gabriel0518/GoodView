@@ -64,18 +64,25 @@ const METRICS = [
   {
     key: "ig_bind",
     label: "IG绑定",
-    sql: (from) => `SELECT ${dayExpr("update_at", TZ)} AS d, count(*) AS n
-                      FROM user_common_task
-                     WHERE task_id = '110' AND status = 'FINISHED' AND update_at >= '${from}'
+    // ⚠️ 必须 join userinfo 限定 app_name='3'：user_common_task 是全产品共用表。
+    //    2026-07-31 起 app_name=32 这个新产品也开始产生 task_id=110，不筛就混进 PWA 看板
+    //    （08-03 实测 37 里有 15 个是 app32 的，占 41%，把 PWA 的真实跌幅盖住了）。
+    //    去重也要：同一用户理论上一条，但 count(*) 没有防重语义。
+    sql: (from) => `SELECT ${dayExpr("t.update_at", TZ)} AS d, count(DISTINCT t.user_id) AS n
+                      FROM user_common_task t
+                      JOIN userinfo u ON u.user_id = t.user_id AND u.app_name = '3'
+                     WHERE t.task_id = '110' AND t.status = 'FINISHED' AND t.update_at >= '${from}'
                      GROUP BY 1 ORDER BY 1`,
   },
   {
     key: "chengcai",
     label: "成材",
     // 对齐 BytePlus 的 pwa_withdraw_audit_apply（申请动作）→ 按 create_at、不筛 status
-    sql: (from) => `SELECT ${dayExpr("create_at", TZ)} AS d, count(*) AS n
-                      FROM user_withdraw_task
-                     WHERE amount = '25' AND create_at >= '${from}'
+    // 同样 join userinfo 限定 app_name='3'（当前非 PWA 提现为 0，但表是全产品共用的，先防住）
+    sql: (from) => `SELECT ${dayExpr("w.create_at", TZ)} AS d, count(*) AS n
+                      FROM user_withdraw_task w
+                      JOIN userinfo u ON u.user_id = w.user_id AND u.app_name = '3'
+                     WHERE w.amount = '25' AND w.create_at >= '${from}'
                      GROUP BY 1 ORDER BY 1`,
   },
 ];
