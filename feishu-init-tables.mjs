@@ -2,6 +2,7 @@
 // 依赖 FEISHU_APP_ID / FEISHU_APP_SECRET / FEISHU_APP_TOKEN（见 FEISHU-SETUP.md）。
 // 用法：node feishu-init-tables.mjs
 import { listTables, createTable, listFields, createField, tableIdMap } from "./lib/feishu.mjs";
+import { applyViewSort, ruleText } from "./lib/view-sort.mjs";
 import { buildTables, CONFIG_TABLES } from "./feishu-tables.mjs";
 import { FEISHU } from "./config.mjs";
 
@@ -40,7 +41,11 @@ async function main() {
     }
     try {
       const id = await createTable(t.name, t.fields);
-      console.log(`  ✅ 已创建：${t.name}（${t.fields.length} 字段）table_id=${id}`);
+      // 新表立刻挂上「日期降序」视图排序：增量同步是追加式的，靠插入顺序永远排不对。
+      // 缺 base:view:write_only 权限只警告不失败——建表本身已经成功，排序可以事后补挂。
+      const s = await applyViewSort(id);
+      const note = s.errors.length ? `（排序未设置：需 base:view:write_only）` : s.rule ? `· 排序 ${ruleText(s.rule)}` : "";
+      console.log(`  ✅ 已创建：${t.name}（${t.fields.length} 字段）table_id=${id} ${note}`);
     } catch (e) {
       console.error(`  ❌ 创建失败：${t.name} — ${e.message}`);
       process.exitCode = 1;
