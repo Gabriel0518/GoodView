@@ -346,7 +346,17 @@ function buildRows({ spend, bp, af, dms, existing, from, to }) {
 // 飞书图表组件只能对单个字段做 SUM/AVG、**算不了比值** → 单价/CPM/CTR/CPC 必须在这里按分量重算好，
 // 并保证每个 (日期,产品,渠道) 只有一行（图表 SUM 一行 = 拿到正确的值）。
 // GROUPING SETS 一次出四个粒度，小计行的产品/渠道写字面量「全部」。
-// 单价的分子只取「有该指标数据的产品」的花费：上架包有花费没注册回传，算进去会把注册单价凭空抬高。
+//
+// 【单价在哪个粒度才有意义】(2026-08-16 修，用户发现单价算成了 0.4)
+//   花费按**真实渠道**分行（XMP 有渠道），但后端转化不一定在同一行：
+//     · PWA / Savvy 的注册·IG绑定·成材来自业务库，**没有渠道维度 → 全落在「未归因」行**（那行花费=0）
+//     · AI公会 的来源标记不带渠道 → 同样落「未归因」行
+//   所以在**渠道明细行**上算这三个单价，分子分母根本不在一起，必然算出 0 或天文数字。
+//   → 它们只在 **渠道='全部'** 的粒度算（GROUPING(channel)=1），渠道明细行一律留空。
+//   安装单价例外：安装和花费都来自 XMP、天然同行，所有粒度都有效。
+//   ⚠️ 旧写法 `SUM(cost) FILTER (WHERE register IS NOT NULL)` 已废弃：改走业务库后它只能捞到
+//      「未归因」行那 0 元花费 + 恰好 register=0 的渠道行，把 08-14 的注册单价算成了 $0.43
+//      （正确是 1025.19/207 = $4.95）。
 async function buildChannelSummary(dates) {
   await withTx(async (c) => {
     await c.query(`DELETE FROM xiaomei_channel_daily WHERE date = ANY($1::date[])`, [dates]);
@@ -362,9 +372,9 @@ async function buildChannelSummary(dates) {
               SUM(click)::numeric / NULLIF(SUM(impression),0) * 100,
               SUM(cost) / NULLIF(SUM(click),0),
               SUM(cost) / NULLIF(SUM(install),0),
-              SUM(cost) FILTER (WHERE register IS NOT NULL) / NULLIF(SUM(register),0),
-              SUM(cost) FILTER (WHERE ig_bind  IS NOT NULL) / NULLIF(SUM(ig_bind),0),
-              SUM(cost) FILTER (WHERE chengcai IS NOT NULL) / NULLIF(SUM(chengcai),0)
+              CASE WHEN GROUPING(channel)=1 THEN SUM(cost) / NULLIF(SUM(register),0) END,
+              CASE WHEN GROUPING(channel)=1 THEN SUM(cost) / NULLIF(SUM(ig_bind),0) END,
+              CASE WHEN GROUPING(channel)=1 THEN SUM(cost) / NULLIF(SUM(chengcai),0) END
          FROM xiaomei_conversion_daily
         WHERE date = ANY($1::date[])
         GROUP BY GROUPING SETS ((date, product, channel), (date, product), (date, channel), (date))`,
