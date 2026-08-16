@@ -7,9 +7,11 @@
 // ─── 三路数据源 ───────────────────────────────────────────────────────────
 // ① 投放侧：**不重新调 XMP**，直接读库里的 campaign_daily + campaign_metric_daily(conversion)。
 //    pull-all 每 5 分钟已经把 XMP 拉进这两张表，再调一次既慢（QPM=10）又可能和 cron 抢配额。
-//    安装 = XMP 的 conversion（媒体侧回传口径）：上架包=安装数，PWA/AI公会=线索/转化数。
-//    （MMP 的 mobile_app_install/af_conversion 对这些账户实测全 0，conversion 是唯一有数的，
-//      见 lib/whitelist.mjs 的注释。）
+//    安装 = XMP 的 **mobile_app_install**（MMP 口径的应用安装），拿不到时回退 conversion。
+//    ⚠️ 2026-08-16 修：原来只用 conversion，对 Savvy 严重低估 —— 08-15 conversion=45 而真实安装 287
+//      （CPI $26 vs $4.09，差 6 倍）。conversion 记的是各账户自己的优化事件，不等于安装。
+//      PWA/AI公会 没有 App 安装，这两个字段都为 0/空，它们的「安装」在业务上看 BytePlus 的
+//      web_install_success（网页装桌面），不在本列里。
 // ② PWA / AI公会 后端：BytePlus，时区锚 America/Chicago。
 // ③ SmartReply / Savvy 后端：AppsFlyer —— 读我们自己的 af_events 表（AF Push API 实时推进来的），
 //    不用调 AF 接口。Savvy 的 AF Push 端点还没配 → 配好并设 SAVVY_AF_APP_ID 后自动生效。
@@ -78,9 +80,11 @@ async function fetchSpend(from, to) {
                         SUM(cost) AS cost, SUM(impression) AS impression, SUM(click) AS click
                    FROM campaign_daily WHERE date BETWEEN $1 AND $2
                   GROUP BY 1,2,3,4),
-          conv AS (SELECT date, account_id, campaign_id, SUM(value) AS install
+          conv AS (SELECT date, account_id, campaign_id,
+                          COALESCE(SUM(value) FILTER (WHERE metric_key='mobile_app_install'),
+                                   SUM(value) FILTER (WHERE metric_key='conversion')) AS install
                      FROM campaign_metric_daily
-                    WHERE metric_key='conversion' AND date BETWEEN $1 AND $2
+                    WHERE metric_key IN ('mobile_app_install','conversion') AND date BETWEEN $1 AND $2
                     GROUP BY 1,2,3)
      SELECT to_char(c.date,'YYYY-MM-DD') AS date, ${PRODUCT_CASE_SQL} AS product, c.channel,
             SUM(c.cost)::float8 AS cost, SUM(c.impression)::bigint AS impression,
