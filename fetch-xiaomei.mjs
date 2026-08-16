@@ -216,11 +216,18 @@ async function fetchAf(from, to) {
 // ⚠️ 业务库**没有渠道维度**（Savvy 的 user_source 全空）→ 这三个指标只能落「未归因」行。
 async function fetchDms(from, to) {
   const targets = PRODUCTS.filter((p) => p.dmsAppName && p.dmsMetrics?.length);
-  if (!targets.length || !dmsEnabled()) return { data: {}, failed: [], note: dmsEnabled() ? "" : "未配置 DMS_TOKEN" };
+  if (!targets.length) return { data: {}, failed: [], ok: {} };
+  if (!dmsEnabled()) {
+    // 未配置 token = 全部指标失败（走下面的「保留旧值」路径，不写 0）
+    return { data: {}, ok: {}, note: "未配置 DMS_TOKEN",
+      failed: targets.flatMap((p) => p.dmsMetrics.map((k) => `${p.key}/${k}: 未配置 DMS_TOKEN`)) };
+  }
   const day = (col) => dayExpr(col, TZ);
   const out = {};
+  const ok = {};   // product -> Set(取数成功的指标) —— 只有成功的才允许覆盖库里的值
   const failed = [];
   for (const p of targets) {
+    ok[p.key] = new Set();
     for (const key of p.dmsMetrics) {
       try {
         const res = await dmsQuery(DMS_METRIC_SQL[key](p.dmsAppName, day, from));
@@ -229,16 +236,30 @@ async function fetchDms(from, to) {
           if (d < from || d > to) continue;
           ((out[p.key] ||= {})[d] ||= {})[key] = Number(r.n) || 0;
         }
+        ok[p.key].add(key); // 查询成功即可覆盖；某天没有行 = 那天真的是 0
       } catch (e) {
         failed.push(`${p.key}/${key}: ${String(e.message).replace(/\s+/g, " ").slice(0, 60)}`);
       }
     }
   }
-  return { data: out, failed };
+  return { data: out, ok, failed };
+}
+
+// 取数失败时的兜底：把库里**已有的**值读回来原样写回去。
+// ⚠️ 这一步是必须的，不是锦上添花：写库是「按日期 DELETE + INSERT」，如果失败时什么都不带，
+//    那些日期的好数据会被连带删掉、再以 0/空 写回 —— 2026-08-16 就这么把 08-09~08-15 的注册
+//    刷成了 0（DMS 瞬时抖动一次，7 天数据全毁）。宁可留旧值，也绝不用 0 覆盖。
+async function loadExisting(from, to) {
+  const { rows } = await query(
+    `SELECT to_char(date,'YYYY-MM-DD') AS date, product, channel, register, ig_bind, golive, chengcai
+       FROM xiaomei_conversion_daily WHERE date BETWEEN $1 AND $2`, [from, to]);
+  const m = new Map();
+  for (const r of rows) m.set(`${r.date}|${r.product}|${r.channel}`, r);
+  return m;
 }
 
 // ───────────────────────── 合并 → 行 ─────────────────────────
-function buildRows({ spend, bp, af, dms, from, to }) {
+function buildRows({ spend, bp, af, dms, existing, from, to }) {
   const dates = [];
   for (let d = new Date(`${from}T00:00:00Z`); ymd(d) <= to; d.setUTCDate(d.getUTCDate() + 1)) dates.push(ymd(d));
 
@@ -292,25 +313,29 @@ function buildRows({ spend, bp, af, dms, from, to }) {
     }
   }
 
-  // 业务库(DMS) 的指标**覆盖** AF 的同名指标（全量真实业务记录，比埋点全），落「未归因」行
-  // ——业务库没有渠道维度。AF 只保留它独有的指标（如 GoLive，带 media_source 所以有渠道）。
+  // 业务库(DMS) 的指标**覆盖** AF/BytePlus 的同名指标（全量真实业务记录，比埋点全且能精确切产品），
+  // 落「未归因」行 —— 业务库没有渠道维度。
+  // ⚠️ **只覆盖取数成功的指标**。失败的指标一律从 existing（库里现有值）原样带回，绝不写 0：
+  //    写库是按日期 DELETE+INSERT，失败时不带旧值就等于把那几天的好数据抹掉。
   for (const p of PRODUCTS.filter((x) => x.dmsMetrics?.length)) {
+    const okSet = dms.ok?.[p.key] || new Set();
     for (const date of dates) {
       const got = dms.data?.[p.key]?.[date];
-      if (!got && !map.has(`${date}|${p.key}|${UNATTRIBUTED}`)) {
-        // 该产品该天业务库没数：仍要把 AF 侧可能写过的同名指标清掉，避免两个口径混着看
-        for (const ch of ALL_CHANNELS) {
-          const ex = map.get(`${date}|${p.key}|${ch}`);
-          if (ex) for (const k of p.dmsMetrics) ex[k] = null;
-        }
-        continue;
-      }
+      const hadRow = ALL_CHANNELS.some((ch) => map.has(`${date}|${p.key}|${ch}`));
+      const prevUnattr = existing.get(`${date}|${p.key}|${UNATTRIBUTED}`);
+      if (!hadRow && !got && !prevUnattr) continue; // 这天这个产品啥都没有，不凭空造行
+
+      // 先把 AF/BytePlus 写进各渠道行的同名指标清掉，口径统一到业务库
       for (const ch of ALL_CHANNELS) {
         const ex = map.get(`${date}|${p.key}|${ch}`);
-        if (ex) for (const k of p.dmsMetrics) ex[k] = null; // 先清 AF 写的，口径统一到业务库
+        if (ex) for (const k of p.dmsMetrics) ex[k] = null;
       }
       const c = cell(date, p.key, UNATTRIBUTED);
-      for (const k of p.dmsMetrics) c[k] = Number(got?.[k] || 0);
+      for (const k of p.dmsMetrics) {
+        c[k] = okSet.has(k)
+          ? Number(got?.[k] || 0)                                   // 取数成功：没有行 = 那天真的是 0
+          : (prevUnattr?.[k] == null ? null : Number(prevUnattr[k])); // 取数失败：保留库里旧值
+      }
     }
   }
 
@@ -378,14 +403,15 @@ async function main() {
   }
 
   const dms = await fetchDms(from, to);
+  const existing = dms.failed.length ? await loadExisting(from, to) : new Map();
   for (const p of PRODUCTS.filter((x) => x.dmsMetrics?.length)) {
     const days = Object.keys(dms.data?.[p.key] || {}).length;
     const labels = p.dmsMetrics.map((k) => BACKEND_METRICS.find((m) => m.key === k).label).join("/");
     console.log(`  ④ ${p.key}(业务库 app_name=${p.dmsAppName})：${labels} ${days} 天${dms.note ? `｜${dms.note}` : ""}`);
   }
-  dms.failed.forEach((f) => console.warn(`     ⚠️ ${f}`));
+  dms.failed.forEach((f) => console.warn(`     ⚠️ 业务库取数失败：${f} —— **保留库里旧值**，不写 0`));
 
-  const rows = buildRows({ spend, bp, af, dms, from, to });
+  const rows = buildRows({ spend, bp, af, dms, existing, from, to });
   if (!rows.length) {
     console.log("\n❌ 没有任何数据，跳过写库，保留原值");
     await end();
@@ -418,7 +444,8 @@ async function main() {
 
   console.log(`\n✅ [小美投放转化] 已写入 Postgres：明细 ${rows.length} 行 + 渠道汇总 ${summaryRows} 行 / ${dates.length} 天（耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s）`);
   await end();
-  if (bp.failed.length) process.exitCode = 1; // 主数据源缺口要让 cron 看得见
+  // 主数据源缺口要让 cron 看得见（失败的指标已保留旧值，不会污染数据，但需要人知道）
+  if (bp.failed.length || dms.failed.length) process.exitCode = 1;
 }
 
 main().catch(async (e) => {
