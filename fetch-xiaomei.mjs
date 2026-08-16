@@ -29,7 +29,7 @@ import { query, withTx, bulkInsert, end } from "./lib/db.mjs";
 import { query as dmsQuery, dayExpr, enabled as dmsEnabled } from "./lib/dms.mjs";
 import {
   XIAOMEI_TIMEZONE as TZ, PRODUCTS, CHANNELS, UNATTRIBUTED, ALL_CHANNELS,
-  AIGUILD_SOURCES, SOURCE_TO_CHANNEL, BACKEND_METRICS, BACKEND_KEYS,
+  AIGUILD_SOURCES, BACKEND_METRICS, BACKEND_KEYS, PWA_APP_NAME_PROP, APP_NAME_VALUES,
   channelFromMediaSource, PRODUCT_CASE_SQL, DMS_METRIC_SQL,
 } from "./lib/xiaomei.mjs";
 
@@ -99,34 +99,38 @@ async function fetchSpend(from, to) {
   return rows;
 }
 
-// ───────────────── ② PWA / AI公会 后端（BytePlus，按 source 拆渠道）─────────────────
-// 每个指标 2 个请求：按 source 分组 + 不分组的全量。
-//   AI公会 = AIguild + AIguild_active + AIguild_passive（三个互不重叠的 source 取值）
-//   PWA    = 全量 − AI公会（用户 2026-08-16 选定：覆盖全部 PWA 用户，含 ~30% source 未归因的，
-//            与 XMP 的 PWA 花费口径更匹配；只取 fb+tt 会少约三成）
-//   渠道拆分：fb→facebook、tt→tiktok，PWA 剩下的进「未归因」；
-//            AI公会 的 source 不带渠道信息 → 整体进「未归因」（花费仍按真实渠道分行）。
+// ───────────────── ② 后端 4 指标（BytePlus，四个产品同一事件同一口径）─────────────────
+// 每个指标 3 个请求：按 pwa_app_name 分组 + 按 source 分组 + 不分组的全量。
+//   Savvy      = pwa_app_name='savvy'
+//   SmartReply = pwa_app_name='smart_reply'
+//   AI公会      = source ∈ AIguild*（三个互不重叠的取值相加）
+//   PWA 本体    = 全量 − 上面三者
+// 2026-08-16 用户提供 pwa_app_name 字段名后重做；此前四个产品分散在 BytePlus/业务库/AppsFlyer
+// 三套系统里、口径互不可比，且 PWA 的数字里混着 Savvy 的量。现在统一了。
+//
+// ⚠️ 后端指标**全部落「未归因」渠道行**：BytePlus 的 source 实测只有 39% 有标记
+// （2026-08-16：注册全量 305 里 185 条无来源），按它拆渠道得到的单价不可用，不如不拆。
+// 花费/曝光/点击/安装仍按 XMP 的真实渠道分行，产品级汇总（渠道=全部）不受影响。
 async function fetchByteplus(from, to) {
   const lastDays = DAYS + 1; // +1 覆盖「今天(进行中)」，取回后按窗口裁掉
   const results = await pMap(
     BACKEND_METRICS,
     async (m) => {
       const args = { eventName: m.byteplus.event, lastDays, indicator: m.byteplus.indicator, filters: m.byteplus.filters || null, timezone: TZ };
-      const [grouped, total] = await Promise.all([
+      const [byApp, bySrc, total] = await Promise.all([
+        fetchEventDailyGrouped({ ...args, groupBy: PWA_APP_NAME_PROP, propertyType: "event_param", groupLocation: "event" }),
         fetchEventDailyGrouped({ ...args, groupBy: "source", propertyType: "profile", groupLocation: "content" }),
         fetchEventDaily(args),
       ]);
-      return { key: m.key, grouped, total };
+      return { key: m.key, byApp, bySrc, total };
     },
     CONCURRENCY,
   );
 
-  // out[product][channel][date][metricKey] = 数值；failed = 整条取数失败的指标（写 NULL 而不是 0）
   const out = {};
   const failed = [];
-  const put = (product, channel, date, key, val) => {
-    ((out[product] ||= {})[channel] ||= {})[date] ||= {};
-    out[product][channel][date][key] = val;
+  const put = (product, date, key, val) => {
+    (((out[product] ||= {})[UNATTRIBUTED] ||= {})[date] ||= {})[key] = clamp0(val);
   };
 
   results.forEach((res, i) => {
@@ -135,20 +139,20 @@ async function fetchByteplus(from, to) {
       failed.push(`${m.label}: ${String(res?.__error?.message || "无结果").replace(/\s+/g, " ").slice(0, 60)}`);
       return;
     }
-    const bySource = new Map(res.grouped.series.map((s) => [String(s.group), s.data]));
-    const at = (src, i2) => Number(bySource.get(src)?.[i2] || 0);
+    const app = new Map(res.byApp.series.map((s) => [String(s.group), s.data]));
+    const src = new Map(res.bySrc.series.map((s) => [String(s.group), s.data]));
 
-    res.grouped.dates.forEach((date, i2) => {
+    res.byApp.dates.forEach((date, j) => {
       if (date < from || date > to) return; // 裁掉窗口外 & 进行中的当天
       const totalCnt = Number(res.total.find((t) => t.date === date)?.count || 0);
-      const aiguild = AIGUILD_SOURCES.reduce((a, s) => a + at(s, i2), 0);
-      const pwaTotal = clamp0(totalCnt - aiguild);
-      const fb = at("fb", i2), tt = at("tt", i2);
+      const savvy = Number(app.get(APP_NAME_VALUES.Savvy)?.[j] || 0);
+      const sr = Number(app.get(APP_NAME_VALUES.SmartReply)?.[j] || 0);
+      const aiguild = AIGUILD_SOURCES.reduce((a, s) => a + Number(src.get(s)?.[j] || 0), 0);
 
-      put("PWA", "facebook", date, m.key, fb);
-      put("PWA", "tiktok", date, m.key, tt);
-      put("PWA", UNATTRIBUTED, date, m.key, clamp0(pwaTotal - fb - tt));
-      put("AI公会", UNATTRIBUTED, date, m.key, aiguild);
+      put("Savvy", date, m.key, savvy);
+      put("SmartReply", date, m.key, sr);
+      put("AI公会", date, m.key, aiguild);
+      put("PWA", date, m.key, totalCnt - savvy - sr - aiguild);
     });
   });
 
