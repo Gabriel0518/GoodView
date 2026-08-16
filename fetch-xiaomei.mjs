@@ -24,10 +24,11 @@
 import { fetchEventDaily, fetchEventDailyGrouped } from "./lib/byteplus.mjs";
 import { pMap } from "./lib/http.mjs";
 import { query, withTx, bulkInsert, end } from "./lib/db.mjs";
+import { query as dmsQuery, dayExpr, enabled as dmsEnabled } from "./lib/dms.mjs";
 import {
   XIAOMEI_TIMEZONE as TZ, PRODUCTS, CHANNELS, UNATTRIBUTED, ALL_CHANNELS,
   AIGUILD_SOURCES, SOURCE_TO_CHANNEL, BACKEND_METRICS, BACKEND_KEYS,
-  channelFromMediaSource, PRODUCT_CASE_SQL,
+  channelFromMediaSource, PRODUCT_CASE_SQL, DMS_METRIC_SQL,
 } from "./lib/xiaomei.mjs";
 
 const DAYS = Number(process.argv[2]) || 7;
@@ -151,50 +152,93 @@ async function fetchByteplus(from, to) {
 }
 
 // ───────────────── ③ SmartReply / Savvy 后端（AppsFlyer，读 af_events）─────────────────
-// 人数口径 = 去重 appsflyer_id（拿不到就退 customer_user_id，再退 dedupe_key=按事件计次）。
+// 人数口径 = 去重用户。**身份字段两个产品不一样**（2026-08-16 实测）：
+//   SmartReply 走 SDK 标准字段，有顶层 appsflyer_id；
+//   Savvy 顶层 appsflyer_id / customer_user_id **全是空**，身份藏在 event_value 里的
+//   user_id(业务用户ID) 和 af_device_id。不取这两个就会退化成按事件计次（同一人多次触发被算成多人）。
 // 事件名按 lib/xiaomei.mjs 的候选顺序取**窗口内第一个有数据的**；一个都没有 → 该指标写 NULL。
-async function fetchAf(from, to) {
-  const wanted = [...new Set(BACKEND_METRICS.flatMap((m) => m.afEvents))];
-  const appIds = PRODUCTS.filter((p) => p.backend === "af").flatMap((p) => p.afAppIds);
-  if (!wanted.length || !appIds.length) return { data: {}, activeEvents: {}, note: appIds.length ? "无 AF 事件候选" : "无 AF app_id（Savvy 未接入）" };
+// 每个候选一条查询（打的是我们自己的 Postgres，成本可忽略），便于对带 amount 过滤的成材单独处理。
+const AF_IDENTITY = `COALESCE(appsflyer_id, customer_user_id,
+                              event_value->>'user_id', event_value->>'af_device_id', dedupe_key)`;
 
-  const { rows } = await query(
-    `SELECT to_char((event_time AT TIME ZONE $3)::date,'YYYY-MM-DD') AS date,
-            app_id, event_name, media_source,
-            COUNT(DISTINCT COALESCE(appsflyer_id, customer_user_id, dedupe_key))::bigint AS uv
-       FROM af_events
-      WHERE event_time >= ($1::date::timestamp AT TIME ZONE $3)
-        AND event_time <  (($2::date + 1)::timestamp AT TIME ZONE $3)
-        AND event_name = ANY($4::text[]) AND app_id = ANY($5::text[])
-      GROUP BY 1,2,3,4`,
-    [from, to, TZ, wanted, appIds],
-  );
+async function fetchAf(from, to) {
+  const appIds = PRODUCTS.filter((p) => p.backend === "af").flatMap((p) => p.afAppIds);
+  if (!appIds.length) return { data: {}, activeEvents: {}, note: "无 AF app_id（Savvy 未接入）" };
 
   const productOf = new Map(PRODUCTS.filter((p) => p.backend === "af").flatMap((p) => p.afAppIds.map((id) => [id, p.key])));
   const out = {};
-  const seenEvents = {}; // product -> Set(有数据的事件名)
-  for (const r of rows) {
-    const product = productOf.get(r.app_id);
-    if (!product) continue;
-    (seenEvents[product] ||= new Set()).add(r.event_name);
-    const channel = channelFromMediaSource(r.media_source);
-    (((out[product] ||= {})[channel] ||= {})[r.date] ||= {})[r.event_name] =
-      (out[product][channel][r.date][r.event_name] || 0) + Number(r.uv);
+  const seen = {}; // product -> Set(有数据的候选 key)
+
+  for (const m of BACKEND_METRICS) {
+    for (const cand of m.afEvents) {
+      const { rows } = await query(
+        `SELECT to_char((event_time AT TIME ZONE $3)::date,'YYYY-MM-DD') AS date,
+                app_id, media_source,
+                COUNT(DISTINCT ${AF_IDENTITY})::bigint AS uv
+           FROM af_events
+          WHERE event_time >= ($1::date::timestamp AT TIME ZONE $3)
+            AND event_time <  (($2::date + 1)::timestamp AT TIME ZONE $3)
+            AND event_name = $4 AND app_id = ANY($5::text[])
+            ${cand.amountEq != null ? `AND (event_value->>'amount')::numeric = $6` : ""}
+          GROUP BY 1,2,3`,
+        cand.amountEq != null ? [from, to, TZ, cand.name, appIds, cand.amountEq] : [from, to, TZ, cand.name, appIds],
+      );
+      for (const r of rows) {
+        const product = productOf.get(r.app_id);
+        if (!product) continue;
+        (seen[product] ||= new Set()).add(`${m.key}|${cand.name}`);
+        const channel = channelFromMediaSource(r.media_source);
+        // ⚠️ 按「指标|候选事件」分开存，**不能**累加进同一个 metric key：
+        //    Savvy 的注册同时上报 af_complete_registration 和 pwa_conv_cash_ready_pop_show
+        //    （同一批人两个名字），加起来会让注册翻倍。下面按 activeEvents 选中的那个取。
+        const c = (((out[product] ||= {})[channel] ||= {})[r.date] ||= {});
+        c[`${m.key}|${cand.name}`] = (c[`${m.key}|${cand.name}`] || 0) + Number(r.uv);
+      }
+    }
   }
 
-  // 每个产品每个指标，选中候选里第一个在窗口内出现过的事件名；都没有 → null（该指标整列留空）
+  // 每个产品每个指标，选中候选里第一个在窗口内出现过的；都没有 → null（该指标整列留空）
   const activeEvents = {};
   for (const p of PRODUCTS.filter((x) => x.backend === "af")) {
     activeEvents[p.key] = {};
     for (const m of BACKEND_METRICS) {
-      activeEvents[p.key][m.key] = m.afEvents.find((e) => seenEvents[p.key]?.has(e)) || null;
+      const hit = m.afEvents.find((c) => seen[p.key]?.has(`${m.key}|${c.name}`));
+      activeEvents[p.key][m.key] = hit ? hit.name : null;
     }
   }
   return { data: out, activeEvents };
 }
 
+// ───────────── ④ Savvy 后端（自有业务库 DMS，app_name=32）─────────────
+// 为什么不用 BytePlus：它区分不出 Savvy（同一个 app、同一套 pwa_* 埋点，source 里没有 savvy）。
+// 业务库能精确切：Savvy 的业务 user_id 100% 命中 userinfo 且 app_name=32，历史比 AF 完整
+// （AF 的 Push 端点 2026-08-16 才开始推）。
+// ⚠️ 业务库**没有渠道维度**（Savvy 的 user_source 全空）→ 这三个指标只能落「未归因」行。
+async function fetchDms(from, to) {
+  const targets = PRODUCTS.filter((p) => p.dmsAppName && p.dmsMetrics?.length);
+  if (!targets.length || !dmsEnabled()) return { data: {}, failed: [], note: dmsEnabled() ? "" : "未配置 DMS_TOKEN" };
+  const day = (col) => dayExpr(col, TZ);
+  const out = {};
+  const failed = [];
+  for (const p of targets) {
+    for (const key of p.dmsMetrics) {
+      try {
+        const res = await dmsQuery(DMS_METRIC_SQL[key](p.dmsAppName, day, from));
+        for (const r of res) {
+          const d = String(r.d).slice(0, 10);
+          if (d < from || d > to) continue;
+          ((out[p.key] ||= {})[d] ||= {})[key] = Number(r.n) || 0;
+        }
+      } catch (e) {
+        failed.push(`${p.key}/${key}: ${String(e.message).replace(/\s+/g, " ").slice(0, 60)}`);
+      }
+    }
+  }
+  return { data: out, failed };
+}
+
 // ───────────────────────── 合并 → 行 ─────────────────────────
-function buildRows({ spend, bp, af, from, to }) {
+function buildRows({ spend, bp, af, dms, from, to }) {
   const dates = [];
   for (let d = new Date(`${from}T00:00:00Z`); ymd(d) <= to; d.setUTCDate(d.getUTCDate() + 1)) dates.push(ymd(d));
 
@@ -242,9 +286,31 @@ function buildRows({ spend, bp, af, from, to }) {
         const c = cell(date, p.key, ch);
         for (const m of BACKEND_METRICS) {
           const ev = active[m.key];
-          if (ev) c[m.key] = Number(got?.[ev] || 0);
+          if (ev) c[m.key] = Number(got?.[`${m.key}|${ev}`] || 0); // key = 指标|选中的候选事件
         }
       }
+    }
+  }
+
+  // 业务库(DMS) 的指标**覆盖** AF 的同名指标（全量真实业务记录，比埋点全），落「未归因」行
+  // ——业务库没有渠道维度。AF 只保留它独有的指标（如 GoLive，带 media_source 所以有渠道）。
+  for (const p of PRODUCTS.filter((x) => x.dmsMetrics?.length)) {
+    for (const date of dates) {
+      const got = dms.data?.[p.key]?.[date];
+      if (!got && !map.has(`${date}|${p.key}|${UNATTRIBUTED}`)) {
+        // 该产品该天业务库没数：仍要把 AF 侧可能写过的同名指标清掉，避免两个口径混着看
+        for (const ch of ALL_CHANNELS) {
+          const ex = map.get(`${date}|${p.key}|${ch}`);
+          if (ex) for (const k of p.dmsMetrics) ex[k] = null;
+        }
+        continue;
+      }
+      for (const ch of ALL_CHANNELS) {
+        const ex = map.get(`${date}|${p.key}|${ch}`);
+        if (ex) for (const k of p.dmsMetrics) ex[k] = null; // 先清 AF 写的，口径统一到业务库
+      }
+      const c = cell(date, p.key, UNATTRIBUTED);
+      for (const k of p.dmsMetrics) c[k] = Number(got?.[k] || 0);
     }
   }
 
@@ -311,7 +377,15 @@ async function main() {
     console.log(`  ③ ${p.key}(AppsFlyer)：${hit.length ? hit.join(" · ") : af.note || "窗口内无数据"}${miss.length ? `｜留空：${miss.join("/")}` : ""}`);
   }
 
-  const rows = buildRows({ spend, bp, af, from, to });
+  const dms = await fetchDms(from, to);
+  for (const p of PRODUCTS.filter((x) => x.dmsMetrics?.length)) {
+    const days = Object.keys(dms.data?.[p.key] || {}).length;
+    const labels = p.dmsMetrics.map((k) => BACKEND_METRICS.find((m) => m.key === k).label).join("/");
+    console.log(`  ④ ${p.key}(业务库 app_name=${p.dmsAppName})：${labels} ${days} 天${dms.note ? `｜${dms.note}` : ""}`);
+  }
+  dms.failed.forEach((f) => console.warn(`     ⚠️ ${f}`));
+
+  const rows = buildRows({ spend, bp, af, dms, from, to });
   if (!rows.length) {
     console.log("\n❌ 没有任何数据，跳过写库，保留原值");
     await end();
