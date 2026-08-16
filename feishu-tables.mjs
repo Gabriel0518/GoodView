@@ -1259,6 +1259,81 @@ const xiaomeiTable = {
   }),
 };
 
+// ===== 小美渠道日汇总（预聚合，供仪表盘画图）=====
+// 数据来自 xiaomei_channel_daily（fetch-xiaomei.mjs 聚合出来）。口径与陷阱见 db/schema.sql 的建表注释。
+//
+// 【为什么不直接拿明细表画图】飞书图表只能对单个字段 SUM/AVG、**算不了比值** → 单价必须预先按分量
+// 算好（SUM花费/SUM转化），且每个 (日期,产品,渠道) 只有一行，图表 SUM 一行才拿到正确值。
+// 【小计行】产品/渠道 = 「全部」的行是小计，**做图必须筛掉不需要的那一层**，否则重复计算：
+//    按渠道看 → 加筛选 产品=全部 且 渠道≠全部；按产品看 → 渠道=全部 且 产品≠全部。
+// 【渠道单价的可信度】上架包(Savvy/SmartReply) 走 AF，花费和转化都有完整渠道归因，渠道单价准；
+//    PWA 的转化只有约 70% 能归到 fb/tt（其余进未归因）→ 渠道级注册单价**偏高**；
+//    AI公会 的来源标记完全不带渠道（花费在 facebook 行、转化在未归因行）→ **只能看产品级**。
+// 【最新日】给指标卡当筛选用（飞书日期筛选只能填死时间戳、不会自己往前滚）。
+const xiaomeiChannelTable = {
+  key: "xiaomei_channel_daily",
+  name: "小美渠道日汇总",
+  windowed: true,
+  fields: [
+    { field_name: "标识", type: FT.TEXT },
+    { field_name: "日期", type: FT.DATE },
+    { field_name: "date_num", type: FT.NUMBER },
+    { field_name: "日期文本", type: FT.TEXT }, // 图表按天分组用（日期字段分组粒度不可控）
+    { field_name: "产品", type: FT.SINGLE_SELECT, property: seed(["PWA", "AI公会", "Savvy", "SmartReply", "全部"]) },
+    { field_name: "渠道", type: FT.SINGLE_SELECT, property: seed([...CHANNELS, "未归因", "全部"]) },
+    { field_name: "花费", type: FT.NUMBER },
+    { field_name: "曝光", type: FT.NUMBER },
+    { field_name: "点击", type: FT.NUMBER },
+    { field_name: "安装", type: FT.NUMBER },
+    { field_name: "注册", type: FT.NUMBER },
+    { field_name: "IG绑定", type: FT.NUMBER },
+    { field_name: "GoLive分发", type: FT.NUMBER },
+    { field_name: "成材(次数)", type: FT.NUMBER },
+    { field_name: "CPM", type: FT.NUMBER },
+    { field_name: "CTR%", type: FT.NUMBER },
+    { field_name: "CPC", type: FT.NUMBER },
+    { field_name: "安装单价", type: FT.NUMBER },
+    { field_name: "注册单价", type: FT.NUMBER },
+    { field_name: "IG绑定单价", type: FT.NUMBER },
+    { field_name: "成材单价", type: FT.NUMBER },
+    { field_name: "最新日", type: FT.CHECKBOX },
+  ],
+  sql: (from, to) => ({
+    text: `SELECT to_char(date,'YYYY-MM-DD') AS date, product, channel,
+                  cost, impression, click, install, register, ig_bind, golive, chengcai,
+                  cpm, ctr, cpc, cost_per_install, cost_per_register, cost_per_ig_bind, cost_per_chengcai,
+                  is_latest
+             FROM xiaomei_channel_daily
+            WHERE date BETWEEN $1 AND $2
+            ORDER BY date DESC, product, channel`,
+    params: [from, to],
+  }),
+  toFields: (r) => ({
+    标识: `${r.date}|${r.product}|${r.channel}`,
+    日期: dateMs(r.date),
+    date_num: dateNum(r.date),
+    日期文本: r.date,
+    产品: r.product,
+    渠道: r.channel,
+    花费: round2(r.cost),
+    曝光: num(r.impression),
+    点击: num(r.click),
+    安装: num(r.install),
+    注册: blank(r.register),
+    IG绑定: blank(r.ig_bind),
+    GoLive分发: blank(r.golive),
+    "成材(次数)": blank(r.chengcai),
+    CPM: round2(r.cpm),
+    "CTR%": round2(r.ctr),
+    CPC: round2(r.cpc),
+    安装单价: blank(r.cost_per_install == null ? null : round2(r.cost_per_install)),
+    注册单价: blank(r.cost_per_register == null ? null : round2(r.cost_per_register)),
+    IG绑定单价: blank(r.cost_per_ig_bind == null ? null : round2(r.cost_per_ig_bind)),
+    成材单价: blank(r.cost_per_chengcai == null ? null : round2(r.cost_per_chengcai)),
+    最新日: Boolean(r.is_latest),
+  }),
+};
+
 // 构建全部镜像表（含从 ad_groups 动态解析的派生看板）。异步：需先查库解析分组。
 // 静态表(campaign/funnel/ig/stageMeta/adGroups/retention)不依赖分组，直接列出。
 export async function buildTables() {
@@ -1281,6 +1356,7 @@ export async function buildTables() {
     tripleDailyTable(g.aiguildCampaigns),
     keyMetricTable(g.aiguildCampaigns),
     xiaomeiTable,
+    xiaomeiChannelTable,
     retentionUser,
     retentionChengcai,
   ];

@@ -13,7 +13,7 @@
     "pull:keymetrics": "node fetch-key-metrics.mjs",
     "pull:dms": "node fetch-dms.mjs",
     "pull:xiaomei": "node fetch-xiaomei.mjs",
-    "xiaomei": "node fetch-xiaomei.mjs && node sync-to-feishu.mjs --table=xiaomei_conversion_daily",
+    "xiaomei": "node fetch-xiaomei.mjs && node sync-to-feishu.mjs --table=xiaomei_conversion_daily,xiaomei_channel_daily",
     "report:daily": "node daily-adgroup-report.mjs",
     "feishu:init": "node feishu-init-tables.mjs",
     "feishu:sync": "node sync-to-feishu.mjs",

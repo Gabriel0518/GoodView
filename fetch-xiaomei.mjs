@@ -251,6 +251,46 @@ function buildRows({ spend, bp, af, from, to }) {
   return [...map.values()].sort((a, b) => a.date.localeCompare(b.date) || a.product.localeCompare(b.product) || a.channel.localeCompare(b.channel));
 }
 
+// ─────────────── 预聚合派生表（供飞书仪表盘画图）───────────────
+// 飞书图表组件只能对单个字段做 SUM/AVG、**算不了比值** → 单价/CPM/CTR/CPC 必须在这里按分量重算好，
+// 并保证每个 (日期,产品,渠道) 只有一行（图表 SUM 一行 = 拿到正确的值）。
+// GROUPING SETS 一次出四个粒度，小计行的产品/渠道写字面量「全部」。
+// 单价的分子只取「有该指标数据的产品」的花费：上架包有花费没注册回传，算进去会把注册单价凭空抬高。
+async function buildChannelSummary(dates) {
+  await withTx(async (c) => {
+    await c.query(`DELETE FROM xiaomei_channel_daily WHERE date = ANY($1::date[])`, [dates]);
+    await c.query(
+      `INSERT INTO xiaomei_channel_daily
+         (date, product, channel, cost, impression, click, install, register, ig_bind, golive, chengcai,
+          cpm, ctr, cpc, cost_per_install, cost_per_register, cost_per_ig_bind, cost_per_chengcai)
+       SELECT date,
+              COALESCE(product, '全部'), COALESCE(channel, '全部'),
+              SUM(cost), SUM(impression), SUM(click), SUM(install),
+              SUM(register), SUM(ig_bind), SUM(golive), SUM(chengcai),
+              SUM(cost) / NULLIF(SUM(impression),0) * 1000,
+              SUM(click)::numeric / NULLIF(SUM(impression),0) * 100,
+              SUM(cost) / NULLIF(SUM(click),0),
+              SUM(cost) / NULLIF(SUM(install),0),
+              SUM(cost) FILTER (WHERE register IS NOT NULL) / NULLIF(SUM(register),0),
+              SUM(cost) FILTER (WHERE ig_bind  IS NOT NULL) / NULLIF(SUM(ig_bind),0),
+              SUM(cost) FILTER (WHERE chengcai IS NOT NULL) / NULLIF(SUM(chengcai),0)
+         FROM xiaomei_conversion_daily
+        WHERE date = ANY($1::date[])
+        GROUP BY GROUPING SETS ((date, product, channel), (date, product), (date, channel), (date))`,
+      [dates],
+    );
+    // is_latest 全表刷新：飞书的日期筛选只能填死时间戳、不会往前滚，指标卡靠这个标记锁定「最新一天」。
+    await c.query(
+      `UPDATE xiaomei_channel_daily
+          SET is_latest = (date = (SELECT MAX(date) FROM xiaomei_channel_daily))
+        WHERE is_latest <> (date = (SELECT MAX(date) FROM xiaomei_channel_daily))`,
+    );
+  });
+  const { rows } = await query(
+    `SELECT count(*)::int n FROM xiaomei_channel_daily WHERE date = ANY($1::date[])`, [dates]);
+  return rows[0].n;
+}
+
 async function main() {
   const t0 = Date.now();
   const { from, to } = windowDates();
@@ -284,6 +324,8 @@ async function main() {
     await bulkInsert(c, "xiaomei_conversion_daily", COLS, rows);
   });
 
+  const summaryRows = await buildChannelSummary(dates);
+
   // 汇总打印：最后一天各产品一行，方便 cron 日志里一眼看出数对不对
   const last = rows.filter((r) => r.date === to);
   const n = (v) => (v == null ? "  留空" : String(v).padStart(6));
@@ -300,7 +342,7 @@ async function main() {
     );
   }
 
-  console.log(`\n✅ [小美投放转化] 已写入 Postgres：${rows.length} 行 / ${dates.length} 天（耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s）`);
+  console.log(`\n✅ [小美投放转化] 已写入 Postgres：明细 ${rows.length} 行 + 渠道汇总 ${summaryRows} 行 / ${dates.length} 天（耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s）`);
   await end();
   if (bp.failed.length) process.exitCode = 1; // 主数据源缺口要让 cron 看得见
 }

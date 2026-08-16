@@ -375,3 +375,48 @@ CREATE TABLE IF NOT EXISTS xiaomei_conversion_daily (
 );
 CREATE INDEX IF NOT EXISTS xiaomei_conversion_daily_date_idx    ON xiaomei_conversion_daily (date);
 CREATE INDEX IF NOT EXISTS xiaomei_conversion_daily_product_idx ON xiaomei_conversion_daily (product, date);
+
+
+-- ========== xiaomei_channel_daily：小美投放转化的**预聚合**汇总（date × 产品 × 渠道）==========
+-- 由 fetch-xiaomei.mjs 在写完明细表后从 xiaomei_conversion_daily 直接聚合出来，供飞书仪表盘画图。
+--
+-- 【为什么必须有这张表】飞书仪表盘的图表组件只能对**单个字段**做 SUM/MAX/MIN/AVERAGE，**算不了比值**。
+-- 如果直接拿明细表画「注册单价」，飞书只能对各行的单价求和或求平均 —— 而比值跨行求平均是错的
+-- （$100/10人 与 $1/1人 的真实单价是 $9.18，平均法给出 $5.5）。所以单价/CPM/CTR/CPC 必须在这里
+-- **按分量重算**（SUM(花费)/SUM(转化)），并且让每个 (日期,产品,渠道) 组合**只有一行**，图表 SUM
+-- 一行 = 取到正确的值。
+--
+-- 【小计行】用 GROUPING SETS 一次算出四个粒度，产品/渠道的合计值写成字面量「全部」：
+--   (日期,产品,渠道) 明细 · (日期,产品)=渠道'全部' · (日期,渠道)=产品'全部' · (日期)=两者都'全部'
+--   ⚠️ 因此**做图必须筛掉不需要的小计行**，否则会重复计算（如按渠道分组时要 产品='全部'）。
+--
+-- 【单价的成本口径】各指标只用「有该指标数据的产品」的花费当分子：
+--   注册单价 = SUM(花费 WHERE 注册非空)/SUM(注册)。不这么做的话，上架包有花费没注册回传，
+--   会把注册单价凭空抬高好几倍。分母为 0/空 → 单价为 NULL（图上断点，不画成 0）。
+--
+-- 【is_latest】标记「全表最新一天」，给指标卡当筛选条件用（飞书的日期筛选只能填死时间戳，
+--   不会自己往前滚）。每轮跑全表刷新一次，只有最新日为 true。
+CREATE TABLE IF NOT EXISTS xiaomei_channel_daily (
+  date              date          NOT NULL,
+  product           text          NOT NULL,   -- PWA / AI公会 / Savvy / SmartReply / 全部
+  channel           text          NOT NULL,   -- facebook / tiktok / google / 未归因 / 全部
+  cost              numeric(18,4) NOT NULL DEFAULT 0,
+  impression        bigint        NOT NULL DEFAULT 0,
+  click             bigint        NOT NULL DEFAULT 0,
+  install           bigint        NOT NULL DEFAULT 0,
+  register          bigint,                   -- 后端 4 指标沿用明细表的可空语义：NULL=无数据源
+  ig_bind           bigint,
+  golive            bigint,
+  chengcai          bigint,
+  cpm               numeric(12,4),            -- 以下比值全部从分量重算，分母为 0 时为 NULL
+  ctr               numeric(8,4),             -- %
+  cpc               numeric(12,4),
+  cost_per_install  numeric(12,4),
+  cost_per_register numeric(12,4),
+  cost_per_ig_bind  numeric(12,4),
+  cost_per_chengcai numeric(12,4),
+  is_latest         boolean       NOT NULL DEFAULT false,
+  updated_at        timestamptz   NOT NULL DEFAULT now(),
+  PRIMARY KEY (date, product, channel)
+);
+CREATE INDEX IF NOT EXISTS xiaomei_channel_daily_date_idx ON xiaomei_channel_daily (date);

@@ -84,10 +84,12 @@ async function main() {
 
   let TABLES = await buildTables(); // 派生表账户/系列从 ad_groups 动态解析
   if (only) {
-    // 表名(中文)或表 key(ASCII)都认。cron 的启动命令用 key —— 容器 locale 不一定是 UTF-8，
-    // 中文参数有被 shell 弄乱的风险，ASCII 没这个问题。
-    TABLES = TABLES.filter((t) => t.name === only || t.key === only);
-    if (!TABLES.length) throw new Error(`--table=${only} 没匹配到任何表定义（名字/key 写错了？见 feishu-tables.mjs）`);
+    // 表名(中文)或表 key(ASCII)都认，逗号分隔可一次推多张。cron 的启动命令用 key —— 容器 locale
+    // 不一定是 UTF-8，中文参数有被 shell 弄乱的风险，ASCII 没这个问题。
+    const want = only.split(",").map((s) => s.trim()).filter(Boolean);
+    TABLES = TABLES.filter((t) => want.includes(t.name) || want.includes(t.key));
+    const missing = want.filter((w) => !TABLES.some((t) => t.name === w || t.key === w));
+    if (missing.length) throw new Error(`--table 里这些没匹配到表定义：${missing.join("、")}（名字/key 写错了？见 feishu-tables.mjs）`);
   }
   const ids = await tableIdMap();
   let failed = 0;
