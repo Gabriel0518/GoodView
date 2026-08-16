@@ -16,6 +16,9 @@ const CHANNELS = ["facebook", "tiktok", "google"];
 const SOURCES = ["fb", "tt", "bff", "AIguild", "AIguild_active", "AIguild_passive", "google", "unknown"];
 
 const num = (v) => (v == null ? 0 : Number(v));
+// NULL → undefined：JSON.stringify 会把 undefined 的键丢掉 → 飞书单元格保持**空**。
+// 用于「数据源未接」的指标列，区别于真实的 0（见 xiaomeiTable 的注释）。
+const blank = (v) => (v == null ? undefined : Number(v));
 const round2 = (v) => Math.round(num(v) * 100) / 100; // 花费类：截到分，避免飞书里一串浮点尾数
 const jstr = (v) => (v == null ? "" : typeof v === "string" ? v : JSON.stringify(v));
 
@@ -435,7 +438,7 @@ const PWA_ACCOUNT_NAMES = ["省广_pwa_3_ymt_新", "省广_pwa_新_1_zmf"];
 const PWA_PPL_SOURCE = `source NOT IN ('AIguild','AIguild_active','AIguild_passive')`;
 
 // 单账户系列日报表：date × 系列 花费/曝光/点击（过滤全 0 行）
-const pwaAccountTable = (name, accId) => ({
+const pwaAccountTable = (name, accId, guildCampaigns) => ({
   key: `acct_${accId}`,
   name,
   windowed: true,
@@ -453,9 +456,10 @@ const pwaAccountTable = (name, accId) => ({
     text: `SELECT to_char(date,'YYYY-MM-DD') AS date, campaign_id, MAX(campaign_name) AS campaign_name,
                    SUM(cost)::float8 AS cost, SUM(impression)::bigint AS impression, SUM(click)::bigint AS click
             FROM campaign_daily WHERE account_id = $1 AND date BETWEEN $2 AND $3
+              AND campaign_id <> ALL($4::text[])
               AND (cost > 0 OR impression > 0 OR click > 0)
             GROUP BY date, campaign_id ORDER BY date DESC`,
-    params: [accId, from, to],
+    params: [accId, from, to, guildCampaigns],
   }),
   toFields: (r) => ({
     标识: `${r.date}|${r.campaign_id}`,
@@ -549,7 +553,7 @@ const appDailyTable = (accountIds) => ({
 //   花费按 campaign_daily.channel、人数按 funnel source（渠道↔source：facebook↔fb、tiktok↔tt、google↔google、Bff↔bff）。
 //   Bff 无广告账户 → 花费恒 0、单价留空（自然量渠道，只看人数）；「其他」= 归不到上述来源的（主要是 unknown）。
 //   ⚠️ AI公会不进本表（source 三桶被排除，花费另在「AI公会转化观测」看板算），故渠道之和 = 大盘非公会总量。
-const pwaDailyTable = (accounts) => ({
+const pwaDailyTable = (accounts, guildCampaigns) => ({
   key: "pwa_daily",
   name: "PWA渠道日报",
   windowed: true,
@@ -575,19 +579,20 @@ const pwaDailyTable = (accounts) => ({
       WITH d AS (SELECT generate_series($1::date,$2::date,'1 day')::date date),
       ch(label,channel,so) AS (VALUES ('Facebook','facebook',0),('TikTok','tiktok',1),('Google','google',2),('Bff','',3),('其他','',4)),
       spend AS (SELECT date, channel, SUM(cost)::float8 cost FROM campaign_daily
-                WHERE account_id = ANY($3) AND date BETWEEN $1 AND $2 GROUP BY date, channel),
+                WHERE account_id = ANY($3) AND campaign_id <> ALL($4::text[])
+                  AND date BETWEEN $1 AND $2 GROUP BY date, channel),
       ppl AS (
         -- 人数按 funnel source 归到渠道；非公会里归不到 fb/tt/google/bff 的（unknown 等）落「其他」，
         -- 保证渠道之和 = 大盘非公会总量（此前只 join fb/tt/google，丢了 bff+unknown 约半数）。
         SELECT date,
           CASE source WHEN 'fb' THEN 'Facebook' WHEN 'tt' THEN 'TikTok' WHEN 'google' THEN 'Google'
                       WHEN 'bff' THEN 'Bff' ELSE '其他' END AS label,
-          SUM(count) FILTER (WHERE stage_key=$4) reg,
-          SUM(count) FILTER (WHERE stage_key=$5) wd,
-          SUM(count) FILTER (WHERE stage_key=$6) ig,
-          SUM(count) FILTER (WHERE stage_key=$7) cc
+          SUM(count) FILTER (WHERE stage_key=$5) reg,
+          SUM(count) FILTER (WHERE stage_key=$6) wd,
+          SUM(count) FILTER (WHERE stage_key=$7) ig,
+          SUM(count) FILTER (WHERE stage_key=$8) cc
         FROM funnel_daily
-        WHERE date BETWEEN $1 AND $2 AND stage_key IN ($4,$5,$6,$7)
+        WHERE date BETWEEN $1 AND $2 AND stage_key IN ($5,$6,$7,$8)
           AND source NOT IN ('AIguild','AIguild_active','AIguild_passive')
         GROUP BY date, label)
       SELECT to_char(d.date,'YYYY-MM-DD') date, ch.label channel, ch.so so, COALESCE(s.cost,0) cost,
@@ -598,7 +603,8 @@ const pwaDailyTable = (accounts) => ({
       WHERE COALESCE(s.cost,0)>0 OR COALESCE(p.reg,0)>0 OR COALESCE(p.wd,0)>0
          OR COALESCE(p.ig,0)>0 OR COALESCE(p.cc,0)>0
       ORDER BY d.date DESC, ch.so`,
-    params: [from, to, accounts, AIGUILD_STAGES.reg, AIGUILD_STAGES.wd, AIGUILD_STAGES.ig, AIGUILD_STAGES.cc],
+    params: [from, to, accounts, guildCampaigns,
+      AIGUILD_STAGES.reg, AIGUILD_STAGES.wd, AIGUILD_STAGES.ig, AIGUILD_STAGES.cc],
   }),
   toFields: (r) => {
     const cost = num(r.cost), reg = num(r.reg), wd = num(r.wd), ig = num(r.ig), cc = num(r.cc);
@@ -617,7 +623,7 @@ const pwaDailyTable = (accounts) => ({
 });
 
 // PWA渠道汇总（4 行：近1/7/14/30 日加权汇总，结构同 AI公会汇总）
-const pwaSummaryTable = (accounts) => ({
+const pwaSummaryTable = (accounts, guildCampaigns) => ({
   key: "pwa_summary",
   name: "PWA渠道汇总",
   windowed: true,
@@ -643,14 +649,15 @@ const pwaSummaryTable = (accounts) => ({
       text: `
         SELECT pr.label AS caliber, pr.ord AS ord,
           (SELECT COALESCE(SUM(cost),0)::float8 FROM campaign_daily
-           WHERE account_id = ANY($1) AND date > $2::date - pr.ao - pr.days AND date <= $2::date - pr.ao) AS cost,
+           WHERE account_id = ANY($1) AND campaign_id <> ALL($3::text[])
+             AND date > $2::date - pr.ao - pr.days AND date <= $2::date - pr.ao) AS cost,
           ${ppl(AIGUILD_STAGES.reg)} AS reg,
           ${ppl(AIGUILD_STAGES.wd)}  AS wd,
           ${ppl(AIGUILD_STAGES.ig)}  AS ig,
           ${ppl(AIGUILD_STAGES.cc)}  AS cc
         FROM (VALUES (0::int,0::int,1::int,'今日'),(1,1,1,'近1日'),(7,1,7,'近7日'),(14,1,14,'近14日'),(30,1,30,'近30日')) pr(ord,ao,days,label)
         ORDER BY pr.ord`,
-      params: [accounts, to],
+      params: [accounts, to, guildCampaigns],
     };
   },
   toFields: (r) => {
@@ -1117,17 +1124,25 @@ async function resolveDerivedGroups() {
   try { groups = await loadAdGroups(); } catch { groups = []; }
   const byName = (kw) => groups.find((g) => g.name.includes(kw));
 
-  // AI公会系列集合
-  let aiguildCampaigns = AIGUILD_CAMPAIGNS;
+  // AI公会系列集合：XMP抓取配置是投放范围与归属的权威源；ad_groups 只作旧配置兜底。
+  let aiguildCampaigns = [];
+  try {
+    const { rows } = await query(
+      `SELECT value FROM xmp_fetch_config
+        WHERE category='campaign' AND enabled AND group_name ~* 'AI公会|AIguild|公会'`,
+    );
+    aiguildCampaigns = rows.map((r) => r.value);
+  } catch { /* 继续走旧分组兜底 */ }
   const aiG = byName("AI公会") || byName("AIguild") || byName("公会");
-  if (aiG) {
+  if (!aiguildCampaigns.length && aiG) {
     try {
       const ids = await resolveGroupToCampaignIds(aiG.members);
       if (ids.length) aiguildCampaigns = ids;
-    } catch { /* 保留默认 */ }
+    } catch { /* 继续走写死兜底 */ }
   }
+  if (!aiguildCampaigns.length) aiguildCampaigns = AIGUILD_CAMPAIGNS;
 
-  // PWA(非公会)看板账户集（[{id,name}]）：抓取配置的 account 行 − 公会账户 − 上架包账户 − 无花费账户，
+  // PWA(非公会)看板账户集（[{id,name}]）：抓取配置的 PWA account 行 − 上架包账户 − 无 PWA 花费账户，
   // 回退写死默认。上架包账户集同样从配置的「广告账户归属」列解析（回退 APP_ACCOUNTS）。
   let pwaAccounts = PWA_ACCOUNTS.map((id, i) => ({ id, name: PWA_ACCOUNT_NAMES[i] || id }));
   let appAccounts = APP_ACCOUNTS.map((a) => ({ id: a.id, name: a.name }));
@@ -1136,21 +1151,17 @@ async function resolveDerivedGroups() {
       `SELECT value, name, group_name FROM xmp_fetch_config WHERE category = 'account' AND enabled = true`,
     );
     if (accRows.length) {
-      // 公会账户 = 拥有任一 AI公会 campaign 的账户（自动排除，避免与公会看板重复计花费）
-      const { rows: gAcc } = await query(
-        `SELECT DISTINCT account_id FROM campaign_daily WHERE campaign_id = ANY($1::text[])`,
-        [aiguildCampaigns],
-      );
-      const guildAccIds = new Set(gAcc.map((r) => r.account_id));
-      // account 行的「值」可填 id 或名称 → 解析成规范 {id, name}，并带近 60 天花费（过滤空账户，免建空表）
+      // account 行的「值」可填 id 或名称 → 解析成规范 {id, name}，并带近 60 天 PWA 花费。
+      // 混合账户不能整户排除：只剔除明确归属 AI 公会的系列，否则会漏掉同账户内的 PWA 系列。
       const vals = accRows.map((r) => r.value);
       const { rows: acc } = await query(
         `SELECT account_id, MAX(account_name) AS account_name,
-                COALESCE(SUM(cost) FILTER (WHERE date > CURRENT_DATE - 60), 0)::float8 AS recent_cost
+                COALESCE(SUM(cost) FILTER (WHERE date > CURRENT_DATE - 60
+                  AND campaign_id <> ALL($2::text[])), 0)::float8 AS recent_cost
            FROM campaign_daily
           WHERE account_id = ANY($1::text[]) OR account_name = ANY($1::text[])
           GROUP BY account_id`,
-        [vals],
+        [vals, aiguildCampaigns],
       );
       const nameById = new Map(acc.map((a) => [a.account_id, a.account_name]));
       const idByName = new Map(acc.map((a) => [a.account_name, a.account_id]));
@@ -1176,7 +1187,7 @@ async function resolveDerivedGroups() {
         if (nameById.has(r.value)) { id = r.value; nm = nameById.get(r.value); }
         else if (idByName.has(r.value)) { id = idByName.get(r.value); nm = r.value; }
         else continue;                        // 填的值在库里查无此账户 → 跳过（无数据可展示）
-        if (guildAccIds.has(id)) continue;     // 排除公会账户（花费归公会看板）
+        if (/AI公会|AIguild|公会/i.test(r.group_name || "")) continue;
         if (appAccounts.some((a) => a.id === id)) continue; // 排除上架包账户（花费归「上架包渠道日报」；
                                                // 它们的转化在 AF 不在 BytePlus，留在这儿会永远是「有花费零转化」）
         if (!spendById.has(id)) continue;     // 排除近 60 天零花费账户（免建空的账户系列表）
@@ -1190,6 +1201,63 @@ async function resolveDerivedGroups() {
 
   return { aiguildCampaigns, pwaAccounts, appAccounts };
 }
+
+// ===== 小美投放转化（date × 产品 × 渠道）=====
+// 数据来自 xiaomei_conversion_daily（fetch-xiaomei.mjs，每日北京 13:10 跑）。口径定义在 lib/xiaomei.mjs。
+// 一行 = 一天 × 一个产品 × 一个渠道，投放侧 4 指标(XMP) + 后端 4 指标(BytePlus/AppsFlyer) 横排。
+//
+// ⚠️ 后端 4 指标**留空 ≠ 0**：留空 = 该产品这个指标没有数据源（Savvy 的 AF Push 还没配、
+//    上架包没有成材事件），0 = 数据源接了、当天确实是 0。所以这里对 NULL 返回 undefined
+//    （飞书字段不写入 = 单元格空），不能用 num() 兜成 0——那会让「没接」在图上长得像「归零」。
+// ⚠️ 「未归因」渠道行：后端指标拆不到渠道时的去处（PWA 的 source 覆盖率约 70%；AI公会 的 source
+//    只标 AIguild* 不带渠道 → 它的后端指标整体落这里，花费仍按真实渠道分行）。
+//    **同一天同一产品「各渠道行相加 = 产品总数」**，按产品汇总时直接求和即可。
+// ⚠️ 不存单价/率（CPM/CTR/注册单价…）：这是明细表，比值不能跨行求和或求平均。
+//    在飞书仪表盘里用 SUM(花费)/SUM(注册) 这类聚合公式现算，才是对的。
+// ⚠️ 「成材」对 PWA/AI公会 是 PV(次数)，与官方关键指标看板一致；上架包侧没有该事件 → 留空。
+const xiaomeiTable = {
+  key: "xiaomei_conversion_daily",
+  name: "小美投放转化",
+  windowed: true,
+  fields: [
+    { field_name: "标识", type: FT.TEXT },
+    { field_name: "日期", type: FT.DATE },
+    { field_name: "date_num", type: FT.NUMBER },
+    { field_name: "产品", type: FT.SINGLE_SELECT, property: seed(["PWA", "AI公会", "Savvy", "SmartReply"]) },
+    { field_name: "渠道", type: FT.SINGLE_SELECT, property: seed([...CHANNELS, "未归因"]) },
+    { field_name: "花费", type: FT.NUMBER },
+    { field_name: "曝光", type: FT.NUMBER },
+    { field_name: "点击", type: FT.NUMBER },
+    { field_name: "安装", type: FT.NUMBER },
+    { field_name: "注册", type: FT.NUMBER },
+    { field_name: "IG绑定", type: FT.NUMBER },
+    { field_name: "GoLive分发", type: FT.NUMBER },
+    { field_name: "成材(次数)", type: FT.NUMBER },
+  ],
+  sql: (from, to) => ({
+    text: `SELECT to_char(date,'YYYY-MM-DD') AS date, product, channel,
+                  cost, impression, click, install, register, ig_bind, golive, chengcai
+             FROM xiaomei_conversion_daily
+            WHERE date BETWEEN $1 AND $2
+            ORDER BY date DESC, product, channel`,
+    params: [from, to],
+  }),
+  toFields: (r) => ({
+    标识: `${r.date}|${r.product}|${r.channel}`,
+    日期: dateMs(r.date),
+    date_num: dateNum(r.date),
+    产品: r.product,
+    渠道: r.channel,
+    花费: round2(r.cost),
+    曝光: num(r.impression),
+    点击: num(r.click),
+    安装: num(r.install),
+    注册: blank(r.register),
+    IG绑定: blank(r.ig_bind),
+    GoLive分发: blank(r.golive),
+    "成材(次数)": blank(r.chengcai),
+  }),
+};
 
 // 构建全部镜像表（含从 ad_groups 动态解析的派生看板）。异步：需先查库解析分组。
 // 静态表(campaign/funnel/ig/stageMeta/adGroups/retention)不依赖分组，直接列出。
@@ -1205,13 +1273,14 @@ export async function buildTables() {
     aiguildTable(g.aiguildCampaigns),
     aiguildSummaryTable(g.aiguildCampaigns),
     aiguildOsSummaryTable(),
-    ...g.pwaAccounts.map((a) => pwaAccountTable(a.name, a.id)),
-    pwaDailyTable(pwaAccIds),
-    pwaSummaryTable(pwaAccIds),
+    ...g.pwaAccounts.map((a) => pwaAccountTable(a.name, a.id, g.aiguildCampaigns)),
+    pwaDailyTable(pwaAccIds, g.aiguildCampaigns),
+    pwaSummaryTable(pwaAccIds, g.aiguildCampaigns),
     appDailyTable(g.appAccounts.map((a) => a.id)),
     txDailyTable(g.aiguildCampaigns),
     tripleDailyTable(g.aiguildCampaigns),
     keyMetricTable(g.aiguildCampaigns),
+    xiaomeiTable,
     retentionUser,
     retentionChengcai,
   ];

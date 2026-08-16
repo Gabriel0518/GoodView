@@ -338,3 +338,40 @@ CREATE TABLE IF NOT EXISTS dms_metric_daily (
   PRIMARY KEY (date, metric_key)
 );
 CREATE INDEX IF NOT EXISTS dms_metric_daily_date_idx ON dms_metric_daily (date);
+
+
+-- ========== xiaomei_conversion_daily：小美投放转化（date × 产品 × 渠道）==========
+-- 由 fetch-xiaomei.mjs 每日 13:10(北京) 写入，供飞书「小美投放转化」表搭可视化看板。
+-- 一行 = 某天某产品某渠道的投放侧(XMP) + 后端转化(BytePlus/AppsFlyer)。
+--
+-- 【为什么后端 4 列可空（NULL ≠ 0）】三个产品的后端数据在三套系统里，覆盖度不同：
+--   NULL = 该产品这个指标**没有数据源**（如 Savvy 的 AF Push 还没配、上架包没有成材事件）——看板里留空；
+--   0    = 数据源接了、当天确实是 0。
+-- 混用会让「没接」和「真的是 0」在看板上长得一样，故用可空列区分。
+--
+-- 【日界】date 一律是 **America/Chicago 日**（= 北京 13:00 ~ 次日 13:00，冬令时 14:00），
+-- 与 XMP 的整日花费按 D↔D 对齐（用户 2026-08-16 定的口径）。XMP 侧日期本身是上海日，两者
+-- 不重切、只做标签对齐，与 lib/key-metrics.mjs 的处理一致（那里有为什么不重切花费的完整说明）。
+--
+-- 【渠道「未归因」行】后端指标能拆到渠道的才落 facebook/tiktok/google，拆不到的落「未归因」：
+--   · PWA：BytePlus 用户属性 source 只有 fb/tt，覆盖率约 70% → 剩下的进未归因；
+--   · AI公会：source 只标 AIguild*，**不带渠道信息** → 后端指标整体进未归因（花费仍按真实渠道分行）；
+--   · SmartReply/Savvy：AF 的 media_source 能完整拆渠道，organic/空 进未归因。
+--   同一产品同一天「各渠道行相加 = 产品总数」，看板按产品汇总时直接求和即可。
+CREATE TABLE IF NOT EXISTS xiaomei_conversion_daily (
+  date       date          NOT NULL,
+  product    text          NOT NULL,            -- PWA / AI公会 / Savvy / SmartReply
+  channel    text          NOT NULL,            -- facebook / tiktok / google / 未归因
+  cost       numeric(18,4) NOT NULL DEFAULT 0,  -- 以下 4 列来自 XMP（campaign_daily / campaign_metric_daily）
+  impression bigint        NOT NULL DEFAULT 0,
+  click      bigint        NOT NULL DEFAULT 0,
+  install    bigint        NOT NULL DEFAULT 0,  -- = XMP conversion（媒体侧回传；上架包=安装，PWA/AI公会=线索）
+  register   bigint,                            -- 以下 4 列来自 BytePlus / AppsFlyer，NULL=无数据源
+  ig_bind    bigint,
+  golive     bigint,
+  chengcai   bigint,                            -- PWA/AI公会 为 PV(次数)，与官方关键指标看板一致
+  updated_at timestamptz   NOT NULL DEFAULT now(),
+  PRIMARY KEY (date, product, channel)
+);
+CREATE INDEX IF NOT EXISTS xiaomei_conversion_daily_date_idx    ON xiaomei_conversion_daily (date);
+CREATE INDEX IF NOT EXISTS xiaomei_conversion_daily_product_idx ON xiaomei_conversion_daily (product, date);

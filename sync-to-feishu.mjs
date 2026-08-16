@@ -12,8 +12,10 @@
 //   要多留历史就调高 FEISHU_MAX_ROWS(≤20000)，或降低该表的行密度。
 //
 // 单个表失败不影响其它表；有任一失败则退出码非 0（cron 里 pull-all 已完成，主库不受影响）。
-// 用法：node sync-to-feishu.mjs [天数]   （默认 FEISHU_SYNC_DAYS）
+// 用法：node sync-to-feishu.mjs [天数] [--table=表名]
 //   一次性回补历史：node sync-to-feishu.mjs 90 → 把近 90 天灌进飞书（受 2 万行上限约束）。
+//   只推一张表：node sync-to-feishu.mjs --table=小美投放转化 → 给独立 cron 用，不去动其它 33 张表
+//   （全量同步要几分钟，日更单表的定时任务没必要每次把整个 Base 重推一遍）。
 import { query, end } from "./lib/db.mjs";
 import {
   tableIdMap, batchCreate, batchDelete, listAllRecordIds,
@@ -74,11 +76,17 @@ async function main() {
     console.log("[飞书同步] 未配置 FEISHU_APP_TOKEN，跳过（Postgres 不受影响）。");
     return;
   }
-  const days = Number(process.argv[2]) || FEISHU.syncDays;
+  const args = process.argv.slice(2);
+  const only = (args.find((a) => a.startsWith("--table=")) || "").slice("--table=".length);
+  const days = Number(args.find((a) => !a.startsWith("--"))) || FEISHU.syncDays;
   const win = windowDates(days);
-  console.log(`[飞书同步] 增量窗口更新 · 窗口 ${win.from} ~ ${win.to}（${days} 天，窗口外历史保留）· 单表上限 ${FEISHU.maxRows} · campaign 粒度=${FEISHU.campaignGrain}`);
+  console.log(`[飞书同步] 增量窗口更新 · 窗口 ${win.from} ~ ${win.to}（${days} 天，窗口外历史保留）· 单表上限 ${FEISHU.maxRows} · campaign 粒度=${FEISHU.campaignGrain}${only ? ` · 仅推「${only}」` : ""}`);
 
-  const TABLES = await buildTables(); // 派生表账户/系列从 ad_groups 动态解析
+  let TABLES = await buildTables(); // 派生表账户/系列从 ad_groups 动态解析
+  if (only) {
+    TABLES = TABLES.filter((t) => t.name === only);
+    if (!TABLES.length) throw new Error(`--table=${only} 没匹配到任何表定义（名字写错了？见 feishu-tables.mjs）`);
+  }
   const ids = await tableIdMap();
   let failed = 0;
   const trimmedTables = [];

@@ -12,6 +12,8 @@
     "pull:seq": "node fetch-snapshot.mjs && node fetch-funnel.mjs",
     "pull:keymetrics": "node fetch-key-metrics.mjs",
     "pull:dms": "node fetch-dms.mjs",
+    "pull:xiaomei": "node fetch-xiaomei.mjs",
+    "xiaomei": "node fetch-xiaomei.mjs && node sync-to-feishu.mjs --table=小美投放转化",
     "report:daily": "node daily-adgroup-report.mjs",
     "feishu:init": "node feishu-init-tables.mjs",
     "feishu:sync": "node sync-to-feishu.mjs",
