@@ -149,8 +149,9 @@ async function fetchByteplus(from, to) {
       const sr = Number(app.get(APP_NAME_VALUES.SmartReply)?.[j] || 0);
       const aiguild = AIGUILD_SOURCES.reduce((a, s) => a + Number(src.get(s)?.[j] || 0), 0);
 
+      // smart_reply 那部分仍要从全量里扣掉（它们是 SmartReply 导流进 PWA 的用户，不属于 PWA 本体），
+      // 但**不写成 SmartReply 的数**——SmartReply 走 AF 口径，见 PRODUCTS 里的说明。
       put("Savvy", date, m.key, savvy);
-      put("SmartReply", date, m.key, sr);
       put("AI公会", date, m.key, aiguild);
       put("PWA", date, m.key, totalCnt - savvy - sr - aiguild);
     });
