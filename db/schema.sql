@@ -354,7 +354,8 @@ CREATE INDEX IF NOT EXISTS dms_metric_daily_date_idx ON dms_metric_daily (date);
 -- 不重切、只做标签对齐，与 lib/key-metrics.mjs 的处理一致（那里有为什么不重切花费的完整说明）。
 --
 -- 【渠道「未归因」行】后端指标能拆到渠道的才落 facebook/tiktok/google，拆不到的落「未归因」：
---   · PWA：BytePlus 用户属性 source 只有 fb/tt，覆盖率约 70% → 剩下的进未归因；
+--   · PWA：注册/IG绑定/成材 走业务库（无渠道维度）→ 全进未归因；仅 GoLive 用 BytePlus 的 source 拆，
+--     而 source 实测只有 39% 有标记（2026-08-16：全量 305 里 185 条无来源）→ 该指标渠道拆分基本不可用；
 --   · AI公会：source 只标 AIguild*，**不带渠道信息** → 后端指标整体进未归因（花费仍按真实渠道分行）；
 --   · SmartReply/Savvy：AF 的 media_source 能完整拆渠道，organic/空 进未归因。
 --   同一产品同一天「各渠道行相加 = 产品总数」，看板按产品汇总时直接求和即可。
