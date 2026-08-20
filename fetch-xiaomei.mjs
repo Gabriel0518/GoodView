@@ -45,7 +45,7 @@ import {
   XIAOMEI_TIMEZONE as TZ, PRODUCTS, CHANNELS, UNATTRIBUTED, ALL_CHANNELS,
   AIGUILD_SOURCES, BACKEND_METRICS, BACKEND_KEYS, PWA_APP_NAME_PROP, APP_NAME_VALUES,
   channelFromMediaSource, PRODUCT_CASE_SQL, DMS_METRIC_SQL,
-  SAVVY_BYTEPLUS, BEAUTY_METRICS,
+  SAVVY_BYTEPLUS, BEAUTY_METRICS, AF_IDENTITY_SQL,
 } from "./lib/xiaomei.mjs";
 
 const DAYS = Number(process.argv[2]) || 7;
@@ -215,8 +215,8 @@ async function fetchByteplus(from, to) {
 //   user_id(业务用户ID) 和 af_device_id。不取这两个就会退化成按事件计次（同一人多次触发被算成多人）。
 // 事件名按 lib/xiaomei.mjs 的候选顺序取**窗口内第一个有数据的**；一个都没有 → 该指标写 NULL。
 // 每个候选一条查询（打的是我们自己的 Postgres，成本可忽略），便于对带 amount 过滤的成材单独处理。
-const AF_IDENTITY = `COALESCE(appsflyer_id, customer_user_id,
-                              event_value->>'user_id', event_value->>'af_device_id', dedupe_key)`;
+// 身份口径见 lib/xiaomei.mjs 的 AF_IDENTITY_SQL —— 那里说明了 iOS 的 user_id 为什么要多取一层 params。
+const AF_IDENTITY = AF_IDENTITY_SQL;
 
 async function fetchAf(from, to) {
   const appIds = PRODUCTS.filter((p) => p.backend === "af").flatMap((p) => p.afAppIds);

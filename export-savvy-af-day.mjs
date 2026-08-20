@@ -7,11 +7,13 @@
 //   抽样 200 个命中 194 个、其中 189 个 app_name=32）。
 //   ⚠️ 只有 pwa_* 自定义事件带它；AF SDK 自带事件（install / af_google_login_* / af_onboarding_completed
 //      等）没有 —— 那时候用户还没建号。要按人贯通含安装的全漏斗，只能用 af_device_id 或设备广告 ID。
+//   ⚠️⚠️ **两端结构不一样**：安卓 user_id 在 event_value 顶层，iOS 在 event_value.params 里。
+//      统一走 lib/xiaomei.mjs 的 AF_USER_ID_SQL，别直接写 event_value->>'user_id'（iOS 会全取成空）。
 //
 // 【跨端】app_id 安卓是包名、iOS 是 id<AppStoreID>，靠 resolveSavvyAfAppIds 自动发现（见 lib/xiaomei.mjs）。
 //   端上区分：安卓有 advertising_id(GAID)，iOS 有 idfa/idfv；platform 字段 Savvy 没回传，不能靠它。
 import { query, end } from "./lib/db.mjs";
-import { resolveSavvyAfAppIds } from "./lib/xiaomei.mjs";
+import { resolveSavvyAfAppIds, AF_USER_ID_SQL, AF_DEVICE_SQL, AF_PLATFORM_SQL } from "./lib/xiaomei.mjs";
 import fs from "node:fs/promises";
 
 const TZ = "Asia/Shanghai";
@@ -27,11 +29,8 @@ const csv = (rows, hdr) => [hdr.join(","), ...rows.map((r) => hdr.map((h) => {
   return /[",\n]/.test(String(v)) ? `"${String(v).replace(/"/g, '""')}"` : v;
 }).join(","))].join("\n");
 
-// 端：Savvy 不回传 platform，用设备广告 ID 反推（GAID=安卓，IDFA/IDFV=iOS）
-const PLAT = `CASE WHEN COALESCE(NULLIF(platform,''), '') <> '' THEN platform
-                   WHEN COALESCE(idfa, idfv, raw->>'idfa', raw->>'idfv') IS NOT NULL THEN 'ios'
-                   WHEN COALESCE(advertising_id, raw->>'advertising_id') IS NOT NULL THEN 'android'
-                   ELSE '未知' END`;
+const PLAT = AF_PLATFORM_SQL;   // 端的判定见 lib/xiaomei.mjs（iOS 的 app_id 是 id<AppStoreID>）
+const UID = AF_USER_ID_SQL;     // ⚠️ iOS 的 user_id 在 event_value.params 里，不在顶层
 
 const APP_IDS = await resolveSavvyAfAppIds(query);
 console.log(`Savvy 的 AF app_id：${APP_IDS.join(", ")}`);
@@ -39,7 +38,7 @@ console.log(`Savvy 的 AF app_id：${APP_IDS.join(", ")}`);
 // 先看这天有没有数、分端各多少 —— iOS 端点刚配好，可能还没有量
 const { rows: mix } = await query(
   `SELECT app_id, ${PLAT} AS 端, count(*) AS 事件数,
-          count(DISTINCT event_value->>'user_id') AS 去重user_id
+          count(DISTINCT ${UID}) AS 去重user_id
      FROM af_events
     WHERE app_id = ANY($2::text[]) AND (event_time AT TIME ZONE $3)::date = $1::date
     GROUP BY 1,2 ORDER BY 3 DESC`, [DAY, APP_IDS, TZ]);
@@ -48,9 +47,9 @@ if (!mix.length) console.log("  （这天没有任何 Savvy 的 AF 回传）");
 else console.table(mix);
 
 const { rows: users } = await query(
-  `SELECT event_value->>'user_id' AS user_id, max(app_id) AS app_id, max(${PLAT}) AS 端,
-          max(event_value->>'af_device_id') AS af_device_id,
-          max(COALESCE(advertising_id, idfa, idfv)) AS 设备广告id,
+  `SELECT ${UID} AS user_id, max(app_id) AS app_id, max(${PLAT}) AS 端,
+          max(${AF_DEVICE_SQL}) AS af_device_id,
+          max(COALESCE(advertising_id, idfa, idfv, raw->>'idfa', raw->>'idfv')) AS 设备广告id,
           max(media_source) AS media_source, max(campaign) AS campaign,
           min(event_time AT TIME ZONE $3)::text AS 首个事件,
           max(event_time AT TIME ZONE $3)::text AS 末个事件,
@@ -61,14 +60,14 @@ const { rows: users } = await query(
           count(*) FILTER (WHERE event_name='pwa_withdraw_audit_apply') AS 提现申请
      FROM af_events
     WHERE app_id = ANY($2::text[]) AND (event_time AT TIME ZONE $3)::date = $1::date
-      AND event_value->>'user_id' IS NOT NULL
+      AND ${UID} IS NOT NULL
     GROUP BY 1 ORDER BY 10 DESC`, [DAY, APP_IDS, TZ]);
 
 const { rows: events } = await query(
   `SELECT (event_time AT TIME ZONE $3)::text AS 事件时间_上海, app_id, ${PLAT} AS 端,
           event_name, media_source, campaign, adset, ad,
-          event_value->>'user_id' AS user_id, event_value->>'af_device_id' AS af_device_id,
-          COALESCE(advertising_id, idfa, idfv) AS 设备广告id,
+          ${UID} AS user_id, ${AF_DEVICE_SQL} AS af_device_id,
+          COALESCE(advertising_id, idfa, idfv, raw->>'idfa', raw->>'idfv') AS 设备广告id,
           country_code, event_value::text AS event_value
      FROM af_events
     WHERE app_id = ANY($2::text[]) AND (event_time AT TIME ZONE $3)::date = $1::date
