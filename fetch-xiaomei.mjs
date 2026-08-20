@@ -322,11 +322,12 @@ async function fetchSavvyByteplus(from, to) {
   return { data: out, ok, failed, dates };
 }
 
-// ───────────── ④ Savvy 后端（自有业务库 DMS，app_name=32）─────────────
-// 为什么不用 BytePlus：它区分不出 Savvy（同一个 app、同一套 pwa_* 埋点，source 里没有 savvy）。
-// 业务库能精确切：Savvy 的业务 user_id 100% 命中 userinfo 且 app_name=32，历史比 AF 完整
-// （AF 的 Push 端点 2026-08-16 才开始推）。
-// ⚠️ 业务库**没有渠道维度**（Savvy 的 user_source 全空）→ 这三个指标只能落「未归因」行。
+// ───────────── ④ 自有业务库 DMS（PWA 的 注册/IG绑定/成材 + Savvy 的 成材）─────────────
+// 为什么用业务库：建号行/任务完成行是**全量真实业务记录**，每人只有一次，就是「当日真实新增」；
+// BytePlus 的日 UV 会把跨天回访又看到弹窗的老用户再算一遍。取哪些指标由 PRODUCTS[].dmsMetrics 定。
+// ⚠️ 2026-08-19 起 Savvy 的注册/IG绑定已改走 BytePlus 的「当天注册」口径（见 ③.5），
+//    那套口径同样是「当日真实新增」，且不依赖 DMS_TOKEN。这里只剩成材。
+// ⚠️ 业务库**没有渠道维度**（Savvy 的 user_source 全空）→ 这些指标只能落「未归因」行。
 async function fetchDms(from, to) {
   const targets = PRODUCTS.filter((p) => p.dmsAppName && p.dmsMetrics?.length);
   if (!targets.length) return { data: {}, failed: [], ok: {} };
