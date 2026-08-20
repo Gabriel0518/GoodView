@@ -8,11 +8,15 @@ import { FT, dateMs, dateNum } from "./lib/feishu.mjs";
 import { FEISHU } from "./config.mjs";
 import { loadAdGroups, resolveGroupToCampaignIds } from "./lib/groups.mjs";
 import { REGION_LABEL } from "./lib/key-metrics.mjs";
+import { PRODUCTS as XIAOMEI_PRODUCTS } from "./lib/xiaomei.mjs";
 import { query } from "./lib/db.mjs";
 
 // 单选字段种子选项（新值写入时飞书会自动补建，这里只给已知值配色）
 const seed = (names) => ({ options: names.map((name, i) => ({ name, color: i % 10 })) });
 const CHANNELS = ["facebook", "tiktok", "google"];
+// 后端转化能拆到真实渠道的产品（口径定义在 lib/xiaomei.mjs 的 PRODUCTS[].channelSplit）。
+// 其余产品的「渠道明细」行只有花费没有转化，日报里用「转化可拆渠道」列标出来。
+const CHANNEL_SPLIT_PRODUCT_KEYS = XIAOMEI_PRODUCTS.filter((p) => p.channelSplit).map((p) => p.key);
 const SOURCES = ["fb", "tt", "bff", "AIguild", "AIguild_active", "AIguild_passive", "google", "unknown"];
 
 const num = (v) => (v == null ? 0 : Number(v));
@@ -1264,6 +1268,97 @@ const xiaomeiTable = {
   }),
 };
 
+// ===== 小美投放日报（日期 × 产品 × 渠道）=====
+// 用户 2026-08-20 要的「分产品同时分投放渠道」的转化日报。数据来自 xiaomei_channel_daily
+// （单价已经在 fetch-xiaomei 里按分量算好，飞书图表只会 SUM/AVG、算不了比值）。
+//
+// 【和另外两张小美表的分工】
+//   小美投放转化   = 明细底表（date×产品×渠道，只有原始量，无单价）
+//   小美渠道日汇总 = 四个粒度的预聚合（含 产品='全部'/渠道='全部' 小计），画图用
+//   小美投放日报   = **就这一张给人看的日报**：只保留「产品×渠道明细」+「产品合计」两层，
+//                    用「行类型」列显式区分，避免像小美渠道日汇总那样四层混在一起、
+//                    做图忘了筛小计就重复计算。
+//
+// 【转化能不能拆到渠道 —— 逐产品不一样，看板上要知道】
+//   Savvy      ✅ BytePlus 用户属性 media_source，覆盖 70~90%，拆不到的进「未归因」行
+//   SmartReply ✅ AppsFlyer media_source，覆盖 98%+
+//   PWA        ❌ 注册/IG绑定/成材 走业务库，业务库没有渠道维度 → 全部进「未归因」
+//   AI公会      ❌ source 只标 AIguild*，不带渠道信息 → 全部进「未归因」
+//   ⚠️ 所以 **PWA / AI公会 的「渠道明细」行只有花费、没有转化**，它们的转化只在「产品合计」行上看。
+//
+// 【未归因不分摊】(用户 2026-08-20 拍板) Savvy 有 10~30% 的转化拆不到渠道，就单独放「未归因」行，
+//   不按比例摊回各渠道。代价：渠道明细行的注册单价会比「产品合计」行的真实混合单价偏高
+//   （08-19 实测 tiktok $10.42 / facebook $13.06，而产品合计 $7.61）。这是如实反映，不是算错。
+//   要看真实综合成本，认准「行类型 = 产品合计」那一行。
+//
+// 【单价留空的两种情况】① 该产品的转化拆不到渠道（PWA/AI公会 的渠道明细行）；
+//   ② 该行花费为 0（未归因行、已停投的产品）—— 0 花费算出来的 $0.00 会被读成「白嫖」，故留空。
+const xiaomeiDailyReport = {
+  key: "xiaomei_daily_report",
+  name: "小美投放日报",
+  windowed: true,
+  fields: [
+    { field_name: "标识", type: FT.TEXT },
+    { field_name: "日期", type: FT.DATE },
+    { field_name: "date_num", type: FT.NUMBER },
+    { field_name: "日期文本", type: FT.TEXT },
+    { field_name: "产品", type: FT.SINGLE_SELECT, property: seed(["PWA", "AI公会", "Savvy", "SmartReply"]) },
+    { field_name: "渠道", type: FT.SINGLE_SELECT, property: seed([...CHANNELS, "未归因", "全部"]) },
+    { field_name: "行类型", type: FT.SINGLE_SELECT, property: seed(["渠道明细", "产品合计"]) },
+    { field_name: "消耗", type: FT.NUMBER },
+    { field_name: "安装", type: FT.NUMBER },
+    { field_name: "安装单价", type: FT.NUMBER },
+    { field_name: "注册", type: FT.NUMBER },
+    { field_name: "注册单价", type: FT.NUMBER },
+    { field_name: "IG绑定", type: FT.NUMBER },
+    { field_name: "IG绑定单价", type: FT.NUMBER },
+    { field_name: "小美注册", type: FT.NUMBER },
+    { field_name: "小美注册单价", type: FT.NUMBER },
+    { field_name: "小美IG绑定", type: FT.NUMBER },
+    { field_name: "GoLive分发", type: FT.NUMBER },
+    { field_name: "成材(次数)", type: FT.NUMBER },
+    { field_name: "成材单价", type: FT.NUMBER },
+    { field_name: "转化可拆渠道", type: FT.TEXT }, // 是/否 —— 提醒这行的渠道转化能不能信
+    { field_name: "最新日", type: FT.CHECKBOX },
+  ],
+  // 只取「产品≠全部」的两层：渠道明细 + 产品合计（渠道='全部'）。
+  // 产品='全部' 的那两层留在小美渠道日汇总里，不进日报，免得一张表里四层小计打架。
+  sql: (from, to) => ({
+    text: `SELECT to_char(date,'YYYY-MM-DD') AS date, product, channel,
+                  cost, install, cost_per_install, register, cost_per_register,
+                  ig_bind, cost_per_ig_bind, beauty_register, cost_per_beauty_register,
+                  beauty_ig_bind, golive, chengcai, cost_per_chengcai, is_latest
+             FROM xiaomei_channel_daily
+            WHERE date BETWEEN $1 AND $2 AND product <> '全部'
+            ORDER BY date DESC, product, (channel = '全部') DESC, channel`,
+    params: [from, to],
+  }),
+  toFields: (r) => ({
+    标识: `${r.date}|${r.product}|${r.channel}`,
+    日期: dateMs(r.date),
+    date_num: dateNum(r.date),
+    日期文本: r.date,
+    产品: r.product,
+    渠道: r.channel,
+    行类型: r.channel === "全部" ? "产品合计" : "渠道明细",
+    消耗: round2(r.cost),
+    安装: num(r.install),
+    安装单价: blank(r.cost_per_install == null ? null : round2(r.cost_per_install)),
+    注册: blank(r.register),
+    注册单价: blank(r.cost_per_register == null ? null : round2(r.cost_per_register)),
+    IG绑定: blank(r.ig_bind),
+    IG绑定单价: blank(r.cost_per_ig_bind == null ? null : round2(r.cost_per_ig_bind)),
+    小美注册: blank(r.beauty_register),
+    小美注册单价: blank(r.cost_per_beauty_register == null ? null : round2(r.cost_per_beauty_register)),
+    小美IG绑定: blank(r.beauty_ig_bind),
+    GoLive分发: blank(r.golive),
+    "成材(次数)": blank(r.chengcai),
+    成材单价: blank(r.cost_per_chengcai == null ? null : round2(r.cost_per_chengcai)),
+    转化可拆渠道: CHANNEL_SPLIT_PRODUCT_KEYS.includes(r.product) ? "是" : "否",
+    最新日: Boolean(r.is_latest),
+  }),
+};
+
 // ===== 小美渠道日汇总（预聚合，供仪表盘画图）=====
 // 数据来自 xiaomei_channel_daily（fetch-xiaomei.mjs 聚合出来）。口径与陷阱见 db/schema.sql 的建表注释。
 //
@@ -1370,6 +1465,7 @@ export async function buildTables() {
     keyMetricTable(g.aiguildCampaigns),
     xiaomeiTable,
     xiaomeiChannelTable,
+    xiaomeiDailyReport,
     retentionUser,
     retentionChengcai,
   ];

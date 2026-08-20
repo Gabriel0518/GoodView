@@ -70,6 +70,12 @@ const COLS = [
 // 所有可空的后端指标列（BACKEND_KEYS 之外还有小美两列），buildRows 建空行时统一置 NULL
 const NULLABLE_KEYS = [...BACKEND_KEYS, ...BEAUTY_METRICS.map((m) => m.key)];
 
+// 哪些产品的后端转化能拆到真实渠道 → 它们的**渠道明细行**上算单价才有意义。
+const CHANNEL_SPLIT_PRODUCTS = PRODUCTS.filter((p) => p.channelSplit).map((p) => p.key);
+// 单价可算的粒度：① 渠道被汇总掉（渠道='全部'，分子分母必在一起）
+//                 ② 或者 产品没被汇总掉 且 该产品的转化能拆渠道
+const OK_GRAIN = `(GROUPING(channel)=1 OR (GROUPING(product)=0 AND product = ANY($2::text[])))`;
+
 const ymd = (d) => d.toISOString().slice(0, 10);
 const shiftYmd = (day, n) => { const d = new Date(`${day}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return ymd(d); };
 const short = (e) => String(e?.message || e).replace(/\s+/g, " ").slice(0, 60);
@@ -272,8 +278,11 @@ async function fetchAf(from, to) {
 // 【日界】Asia/Shanghai。窗口沿用主流程的 [from, to]（那是芝加哥日标签），因为芝加哥的"昨天"
 // 一定是一个已经结束的上海日（上海比芝加哥早 13~14 小时），不会取到半天。
 //
-// 【渠道】BytePlus 侧没有可用的渠道归因（source 只有 39% 有标记）→ 四个指标全部落「未归因」行，
-// 与业务库那几个指标的处理一致。
+// 【渠道】按用户属性 media_source 拆到 facebook/tiktok/google，拆不到的落「未归因」（用户 2026-08-20
+// 拍板：**不按比例分摊**，未归因就老老实实单独一行 —— 分摊出来的单价好看但是估的）。
+//   覆盖率逐日 70~90%，所以渠道行的注册单价会比真实混合单价高一些，这是如实反映而不是算错。
+//   每个指标查两次：**总量**（不分组）+ **按 media_source 分组**，残差(总量−各组之和)补进「未归因」。
+//   为什么要单独查总量：分组会丢掉属性完全缺失的用户，只靠分组求和会让产品合计比拆分前少几个人。
 async function fetchSavvyByteplus(from, to) {
   const cfg = SAVVY_BYTEPLUS;
   const tz = cfg.timezone;
@@ -290,9 +299,25 @@ async function fetchSavvyByteplus(from, to) {
     { property: "face_score", operation: ">=", values: [String(cfg.faceScoreMin)] },
   ];
 
-  const out = {};   // date -> { key: n }
+  const out = {};   // date -> channel -> { key: n }
   const ok = new Set();
   const failed = [];
+
+  // 各组 → 渠道，并把「总量 − 各组之和」的残差补进未归因。
+  // channelFromMediaSource 认得 Facebook+Ads / tiktokglobal_int / googleadwords_int；
+  // 空值、appsflyer_sdk_test_int 等一律进未归因。
+  const spread = (total, groups) => {
+    const byCh = {};
+    let attributed = 0;
+    for (const { group, n } of groups) {
+      if (!n) continue;
+      byCh[channelFromMediaSource(group)] = (byCh[channelFromMediaSource(group)] || 0) + n;
+      attributed += n;
+    }
+    const residual = clamp0(total - attributed);
+    if (residual) byCh[UNATTRIBUTED] = (byCh[UNATTRIBUTED] || 0) + residual;
+    return byCh;
+  };
 
   const perDay = await pMap(dates, async (date) => {
     // 当天注册 = 注册时间落在这一天（目标时区）
@@ -300,17 +325,19 @@ async function fetchSavvyByteplus(from, to) {
     const hi = dayStartMs(shiftYmd(date, 1), tz);
     const newUser = profileRangeExprs(cfg.registerTimeProp, lo, hi);
     const period = dayRangePeriod(date, date, tz);
-    const got = {};
+    const got = {};   // key -> { channel: n }
     const errs = [];
 
-    // 注册 / IG绑定：普通事件去重人数
+    // 注册 / IG绑定：普通事件去重人数（总量 + 按 media_source 分组）
     await Promise.all(eventMetrics.map(async (m) => {
       try {
-        const rows = await fetchEventDaily({
-          eventName: m.event, period, filters: cfg.appNameFilter,
-          profileExpressions: newUser, timezone: tz,
-        });
-        got[m.key] = rows.reduce((a, r) => a + Number(r.count || 0), 0); // 单日窗口，只会有一行
+        const args = { eventName: m.event, period, filters: cfg.appNameFilter, profileExpressions: newUser, timezone: tz };
+        const [rows, grouped] = await Promise.all([
+          fetchEventDaily(args),
+          fetchEventDailyGrouped({ ...args, groupBy: cfg.channelProp, propertyType: "profile", groupLocation: "content" }),
+        ]);
+        const total = rows.reduce((a, r) => a + Number(r.count || 0), 0); // 单日窗口，只会有一行
+        got[m.key] = spread(total, grouped.series.map((x) => ({ group: x.group, n: Number(x.sum) || 0 })));
       } catch (e) { errs.push(`${m.label}: ${short(e)}`); }
     }));
 
@@ -321,8 +348,12 @@ async function fetchSavvyByteplus(from, to) {
           funnelStep("A", cfg.faceEvent, faceFilter, "and"),
           funnelStep("B", m.event, cfg.appNameFilter),
         ];
-        const counts = await fetchFunnelUsers({ steps, period, profileExpressions: newUser, windowDays: 1, timezone: tz });
-        got[m.key] = Number(counts[1] || 0);
+        const args = { steps, period, profileExpressions: newUser, windowDays: 1, timezone: tz };
+        const [counts, grouped] = await Promise.all([
+          fetchFunnelUsers(args),
+          fetchFunnelUsers({ ...args, groupBy: cfg.channelProp }),
+        ]);
+        got[m.key] = spread(Number(counts[1] || 0), grouped.map((x) => ({ group: x.group, n: Number(x.counts[1] || 0) })));
       } catch (e) { errs.push(`${m.label}: ${short(e)}`); }
     }));
 
@@ -338,7 +369,12 @@ async function fetchSavvyByteplus(from, to) {
   }
   for (const d of perDay) {
     if (!d) continue;
-    out[d.date] = d.got;
+    // got: key -> {channel:n}  →  out: date -> channel -> {key:n}
+    const byCh = {};
+    for (const [key, chMap] of Object.entries(d.got)) {
+      for (const [ch, n] of Object.entries(chMap)) (byCh[ch] ||= {})[key] = n;
+    }
+    out[d.date] = byCh;
     d.errs.forEach((e) => failed.push(`${d.date} ${e}`));
   }
   return { data: out, ok, failed, dates };
@@ -462,7 +498,10 @@ function buildRows({ spend, bp, af, dms, savvyBp, existing, from, to, toChi }) {
   //    写库是按日期 DELETE+INSERT，失败时不带旧值就等于把那几天的好数据抹掉
   //    （2026-08-16 就是这么把 08-09~08-15 的注册刷成 0 的）。
   // maxDate = 该来源自己那个日界的最后一个完整日；超过就跳过（留 NULL，别写 0）。
-  const overrideUnattributed = (productKey, metricKeys, okSet, dataByDate, maxDate) => {
+  // byChannel=false（业务库）：数据没有渠道维度，整包落「未归因」。
+  // byChannel=true（Savvy 的 BytePlus 新口径）：dataByDate[date][channel][key]，按渠道各归各位，
+  //   拆不到的那部分本来就已经在 UNATTRIBUTED 这个 key 下（见 fetchSavvyByteplus 的 spread）。
+  const override = (productKey, metricKeys, okSet, dataByDate, maxDate, byChannel = false) => {
     for (const date of dates) {
       if (date > maxDate) continue;
       const got = dataByDate?.[date];
@@ -475,11 +514,20 @@ function buildRows({ spend, bp, af, dms, savvyBp, existing, from, to, toChi }) {
         const ex = map.get(`${date}|${productKey}|${ch}`);
         if (ex) for (const k of metricKeys) ex[k] = null;
       }
-      const c = cell(date, productKey, UNATTRIBUTED);
+
       for (const k of metricKeys) {
-        c[k] = okSet.has(k)
-          ? Number(got?.[k] || 0)                                   // 取数成功：没有行 = 那天真的是 0
-          : (prevUnattr?.[k] == null ? null : Number(prevUnattr[k])); // 取数失败：保留库里旧值
+        if (!okSet.has(k)) {
+          // 取数失败：保留库里旧值（**绝不写 0**，写库是按日期 DELETE+INSERT，不带回来就等于抹掉）
+          const prev = prevUnattr?.[k];
+          if (prev != null) cell(date, productKey, UNATTRIBUTED)[k] = Number(prev);
+          continue;
+        }
+        if (!byChannel) { cell(date, productKey, UNATTRIBUTED)[k] = Number(got?.[k] || 0); continue; }
+        // 取数成功：**每个渠道都要落数**（没有行 = 那天该渠道真的是 0），否则渠道行会留空
+        for (const ch of ALL_CHANNELS) {
+          const v = Number(got?.[ch]?.[k] || 0);
+          if (v || map.has(`${date}|${productKey}|${ch}`) || ch === UNATTRIBUTED) cell(date, productKey, ch)[k] = v;
+        }
       }
     }
   };
@@ -487,10 +535,10 @@ function buildRows({ spend, bp, af, dms, savvyBp, existing, from, to, toChi }) {
   // Savvy 的 BytePlus 新口径先落 —— 业务库那轮只覆盖成材，两边指标不重叠，先后无所谓，
   // 但放前面更直观：这是 Savvy 注册/IG绑定的唯一来源。
   for (const p of PRODUCTS.filter((x) => x.savvyBpMetrics?.length)) {
-    overrideUnattributed(p.key, p.savvyBpMetrics, savvyBp.ok || new Set(), savvyBp.data, to);      // 上海日界，填到底
+    override(p.key, p.savvyBpMetrics, savvyBp.ok || new Set(), savvyBp.data, to, true);  // 上海日界，按渠道拆
   }
   for (const p of PRODUCTS.filter((x) => x.dmsMetrics?.length)) {
-    overrideUnattributed(p.key, p.dmsMetrics, dms.ok?.[p.key] || new Set(), dms.data?.[p.key], toChi); // 芝加哥日界
+    override(p.key, p.dmsMetrics, dms.ok?.[p.key] || new Set(), dms.data?.[p.key], toChi); // 芝加哥日界，无渠道
   }
 
   return [...map.values()].sort((a, b) => a.date.localeCompare(b.date) || a.product.localeCompare(b.product) || a.channel.localeCompare(b.channel));
@@ -506,9 +554,17 @@ function buildRows({ spend, bp, af, dms, savvyBp, existing, from, to, toChi }) {
 //     · PWA / Savvy 的注册·IG绑定·成材来自业务库，**没有渠道维度 → 全落在「未归因」行**（那行花费=0）
 //     · AI公会 的来源标记不带渠道 → 同样落「未归因」行
 //   所以在**渠道明细行**上算这三个单价，分子分母根本不在一起，必然算出 0 或天文数字。
-//   → 它们只在 **渠道='全部'** 的粒度算（GROUPING(channel)=1），渠道明细行一律留空。
+//   → 默认只在 **渠道='全部'** 的粒度算（GROUPING(channel)=1）。
+//   【2026-08-20 起的例外】转化**能拆到真实渠道**的产品（PRODUCTS[].channelSplit：Savvy 走 BytePlus
+//   的 media_source、SmartReply 走 AF 的 media_source），它们的渠道明细行分子分母就在同一行，
+//   所以渠道级单价对这两个产品是有效的 → 放开。
+//   ⚠️ 但只在 **产品维度没有被汇总掉** 时放开（GROUPING(product)=0）：产品='全部' 的行把能拆渠道的
+//      和不能拆的混在一起了（PWA/AI公会 的转化全在未归因），那一层的渠道单价仍然没有意义。
+//   ⚠️ 渠道归因只覆盖 70~90%（Savvy），未归因部分**不分摊**（用户 2026-08-20 拍板）→ 渠道行的
+//      单价会比产品级的真实混合单价偏高。这是如实反映口径，不是算错。
 //   安装单价例外：安装和花费都来自 XMP、天然同行，所有粒度都有效。
-//   小美注册单价同理只在 渠道='全部' 算（Savvy 的小美两列同样落「未归因」行）。
+//   ⚠️ 分子也套 NULLIF(SUM(cost),0)：花费为 0 的行（未归因行、已停投的产品）算出来的单价是 $0.00，
+//      在看板上会被读成「白嫖」，而真相是「这行没有花费可归」。留空才是对的。
 //   ⚠️ 旧写法 `SUM(cost) FILTER (WHERE register IS NOT NULL)` 已废弃：改走业务库后它只能捞到
 //      「未归因」行那 0 元花费 + 恰好 register=0 的渠道行，把 08-14 的注册单价算成了 $0.43
 //      （正确是 1025.19/207 = $4.95）。
@@ -529,15 +585,15 @@ async function buildChannelSummary(dates) {
               SUM(cost) / NULLIF(SUM(impression),0) * 1000,
               SUM(click)::numeric / NULLIF(SUM(impression),0) * 100,
               SUM(cost) / NULLIF(SUM(click),0),
-              SUM(cost) / NULLIF(SUM(install),0),
-              CASE WHEN GROUPING(channel)=1 THEN SUM(cost) / NULLIF(SUM(register),0) END,
-              CASE WHEN GROUPING(channel)=1 THEN SUM(cost) / NULLIF(SUM(ig_bind),0) END,
-              CASE WHEN GROUPING(channel)=1 THEN SUM(cost) / NULLIF(SUM(chengcai),0) END,
-              CASE WHEN GROUPING(channel)=1 THEN SUM(cost) / NULLIF(SUM(beauty_register),0) END
+              NULLIF(SUM(cost),0) / NULLIF(SUM(install),0),
+              CASE WHEN ${OK_GRAIN} THEN NULLIF(SUM(cost),0) / NULLIF(SUM(register),0) END,
+              CASE WHEN ${OK_GRAIN} THEN NULLIF(SUM(cost),0) / NULLIF(SUM(ig_bind),0) END,
+              CASE WHEN ${OK_GRAIN} THEN NULLIF(SUM(cost),0) / NULLIF(SUM(chengcai),0) END,
+              CASE WHEN ${OK_GRAIN} THEN NULLIF(SUM(cost),0) / NULLIF(SUM(beauty_register),0) END
          FROM xiaomei_conversion_daily
         WHERE date = ANY($1::date[])
         GROUP BY GROUPING SETS ((date, product, channel), (date, product), (date, channel), (date))`,
-      [dates],
+      [dates, CHANNEL_SPLIT_PRODUCTS],
     );
     // is_latest 全表刷新：飞书的日期筛选只能填死时间戳、不会往前滚，指标卡靠这个标记锁定「最新一天」。
     await c.query(
