@@ -1233,10 +1233,13 @@ const xiaomeiTable = {
     { field_name: "IG绑定", type: FT.NUMBER },
     { field_name: "GoLive分发", type: FT.NUMBER },
     { field_name: "成材(次数)", type: FT.NUMBER },
+    { field_name: "小美注册", type: FT.NUMBER },
+    { field_name: "小美IG绑定", type: FT.NUMBER },
   ],
   sql: (from, to) => ({
     text: `SELECT to_char(date,'YYYY-MM-DD') AS date, product, channel,
-                  cost, impression, click, install, register, ig_bind, golive, chengcai
+                  cost, impression, click, install, register, ig_bind, golive, chengcai,
+                  beauty_register, beauty_ig_bind
              FROM xiaomei_conversion_daily
             WHERE date BETWEEN $1 AND $2
             ORDER BY date DESC, product, channel`,
@@ -1256,6 +1259,8 @@ const xiaomeiTable = {
     IG绑定: blank(r.ig_bind),
     GoLive分发: blank(r.golive),
     "成材(次数)": blank(r.chengcai),
+    小美注册: blank(r.beauty_register),
+    小美IG绑定: blank(r.beauty_ig_bind),
   }),
 };
 
@@ -1290,6 +1295,8 @@ const xiaomeiChannelTable = {
     { field_name: "IG绑定", type: FT.NUMBER },
     { field_name: "GoLive分发", type: FT.NUMBER },
     { field_name: "成材(次数)", type: FT.NUMBER },
+    { field_name: "小美注册", type: FT.NUMBER },
+    { field_name: "小美IG绑定", type: FT.NUMBER },
     { field_name: "CPM", type: FT.NUMBER },
     { field_name: "CTR%", type: FT.NUMBER },
     { field_name: "CPC", type: FT.NUMBER },
@@ -1297,13 +1304,15 @@ const xiaomeiChannelTable = {
     { field_name: "注册单价", type: FT.NUMBER },
     { field_name: "IG绑定单价", type: FT.NUMBER },
     { field_name: "成材单价", type: FT.NUMBER },
+    { field_name: "小美注册单价", type: FT.NUMBER },
     { field_name: "最新日", type: FT.CHECKBOX },
   ],
   sql: (from, to) => ({
     text: `SELECT to_char(date,'YYYY-MM-DD') AS date, product, channel,
                   cost, impression, click, install, register, ig_bind, golive, chengcai,
+                  beauty_register, beauty_ig_bind,
                   cpm, ctr, cpc, cost_per_install, cost_per_register, cost_per_ig_bind, cost_per_chengcai,
-                  is_latest
+                  cost_per_beauty_register, is_latest
              FROM xiaomei_channel_daily
             WHERE date BETWEEN $1 AND $2
             ORDER BY date DESC, product, channel`,
@@ -1324,6 +1333,8 @@ const xiaomeiChannelTable = {
     IG绑定: blank(r.ig_bind),
     GoLive分发: blank(r.golive),
     "成材(次数)": blank(r.chengcai),
+    小美注册: blank(r.beauty_register),
+    小美IG绑定: blank(r.beauty_ig_bind),
     CPM: round2(r.cpm),
     "CTR%": round2(r.ctr),
     CPC: round2(r.cpc),
@@ -1331,6 +1342,7 @@ const xiaomeiChannelTable = {
     注册单价: blank(r.cost_per_register == null ? null : round2(r.cost_per_register)),
     IG绑定单价: blank(r.cost_per_ig_bind == null ? null : round2(r.cost_per_ig_bind)),
     成材单价: blank(r.cost_per_chengcai == null ? null : round2(r.cost_per_chengcai)),
+    小美注册单价: blank(r.cost_per_beauty_register == null ? null : round2(r.cost_per_beauty_register)),
     最新日: Boolean(r.is_latest),
   }),
 };

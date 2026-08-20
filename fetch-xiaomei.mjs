@@ -13,17 +13,29 @@
 //      PWA/AI公会 没有 App 安装，这两个字段都为 0/空，它们的「安装」在业务上看 BytePlus 的
 //      web_install_success（网页装桌面），不在本列里。
 // ② PWA / AI公会 后端：BytePlus，时区锚 America/Chicago。
-// ③ SmartReply / Savvy 后端：AppsFlyer —— 读我们自己的 af_events 表（AF Push API 实时推进来的），
-//    不用调 AF 接口。Savvy 的 AF Push 端点还没配 → 配好并设 SAVVY_AF_APP_ID 后自动生效。
+// ③ SmartReply 后端：AppsFlyer —— 读我们自己的 af_events 表（AF Push API 实时推进来的），不调 AF 接口。
+// ③.5 Savvy 的 注册/IG绑定/小美注册/小美IG绑定：BytePlus 的**「当天注册」口径**，时区锚 Asia/Shanghai
+//    （用户 2026-08-19 给了 BytePlus SQL，口径逐条对齐，定义见 lib/xiaomei.mjs 的 SAVVY_BYTEPLUS）。
+//    与 ② 的区别是多了一条「user_register_time 落在当天」的用户属性过滤 —— 这一条把「含回访老用户
+//    的日 UV」变成了「当日真实新增」，正是之前不得不绕去业务库的原因，现在 BytePlus 自己能切了。
+//    Savvy 的成材仍走业务库（④），GoLive 仍走 ②。
+// ④ 业务库(DMS)：PWA 的注册/IG绑定/成材 + Savvy 的成材。
 //
 // ─── 日界（这个脚本的核心口径）─────────────────────────────────────────────
-// 全部按 **America/Chicago 日** 切 = 北京 13:00 ~ 次日 13:00（冬令时 14:00~14:00，自动跟随）。
+// 默认按 **America/Chicago 日** 切 = 北京 13:00 ~ 次日 13:00（冬令时 14:00~14:00，自动跟随）。
+// ⚠️ 例外：Savvy 的 注册/IG绑定/小美注册/小美IG绑定 按 **Asia/Shanghai 日** 切（用户 2026-08-19 拍板，
+//    与他给的 SQL 逐字一致；顺带与 XMP 的上海日花费天然对齐，Savvy 的注册单价因此更准）。
+//    同一行里 Savvy 的成材/GoLive 仍是芝加哥日 —— 跨指标/跨产品比较时要知道这个混合日界。
+//    窗口沿用芝加哥日标签是安全的：芝加哥的"昨天"一定是一个已经结束的上海日（上海早 13~14 小时）。
 // XMP 的日期按上海日切，两边不重切、只做 D↔D 标签对齐（用户 2026-08-16 定）。
 // **只写已经结束的芝加哥日**：目标窗口的最后一天 = 昨天(芝加哥)，永远不会把半天的数据写进去。
 // ⚠️ cron 定在北京 13:10 是踩着夏令时的日界（13:00 刚结束）。到了冬令时，芝加哥日要到北京 14:00
 //    才结束，13:10 跑的时候最新一天还没完 → 那天的数据由**次日**那轮的回补窗口补上（所以默认 7 天，
 //    不是 1 天）。想冬天也当天出数，把 cron 从 05:10 UTC 改成 06:10 UTC 即可。
-import { fetchEventDaily, fetchEventDailyGrouped } from "./lib/byteplus.mjs";
+import {
+  fetchEventDaily, fetchEventDailyGrouped, fetchFunnelUsers,
+  dayRangePeriod, dayStartMs, profileRangeExprs, funnelStep,
+} from "./lib/byteplus.mjs";
 import { pMap } from "./lib/http.mjs";
 import { query, withTx, bulkInsert, end } from "./lib/db.mjs";
 import { query as dmsQuery, dayExpr, enabled as dmsEnabled } from "./lib/dms.mjs";
@@ -31,6 +43,7 @@ import {
   XIAOMEI_TIMEZONE as TZ, PRODUCTS, CHANNELS, UNATTRIBUTED, ALL_CHANNELS,
   AIGUILD_SOURCES, BACKEND_METRICS, BACKEND_KEYS, PWA_APP_NAME_PROP, APP_NAME_VALUES,
   channelFromMediaSource, PRODUCT_CASE_SQL, DMS_METRIC_SQL,
+  SAVVY_BYTEPLUS, BEAUTY_METRICS,
 } from "./lib/xiaomei.mjs";
 
 const DAYS = Number(process.argv[2]) || 7;
@@ -48,9 +61,16 @@ const COLS = [
   { name: "ig_bind", type: "bigint" },
   { name: "golive", type: "bigint" },
   { name: "chengcai", type: "bigint" },
+  { name: "beauty_register", type: "bigint" },   // 仅 Savvy 有；其余产品恒为 NULL
+  { name: "beauty_ig_bind", type: "bigint" },
 ];
 
+// 所有可空的后端指标列（BACKEND_KEYS 之外还有小美两列），buildRows 建空行时统一置 NULL
+const NULLABLE_KEYS = [...BACKEND_KEYS, ...BEAUTY_METRICS.map((m) => m.key)];
+
 const ymd = (d) => d.toISOString().slice(0, 10);
+const shiftYmd = (day, n) => { const d = new Date(`${day}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return ymd(d); };
+const short = (e) => String(e?.message || e).replace(/\s+/g, " ").slice(0, 60);
 const pad = (s, n) => String(s).padEnd(n);
 const clamp0 = (n) => Math.max(0, n);
 
@@ -218,6 +238,90 @@ async function fetchAf(from, to) {
   return { data: out, activeEvents };
 }
 
+// ─────── ③.5 Savvy 后端（BytePlus「当天注册」口径，用户 2026-08-19 给的 SQL）───────
+// 口径定义与全部坑都写在 lib/xiaomei.mjs 的 SAVVY_BYTEPLUS 注释里，这里只负责发请求。
+//
+// 【为什么一天一次查询】「当天注册」是 user_register_time ∈ [当天00:00, 次日00:00) 的**绝对时间**
+// 区间过滤，一次查多天会把整段窗口的注册者混在一起。所以窗口里每一天各发一轮：
+//   · 两次事件分析（注册 / IG绑定）
+//   · 两次漏斗（小美注册 / 小美IG绑定，face_score>=70 → 目标事件）
+// 7 天 = 28 个请求，和现有 BytePlus 用量在同一量级。
+//
+// 【日界】Asia/Shanghai。窗口沿用主流程的 [from, to]（那是芝加哥日标签），因为芝加哥的"昨天"
+// 一定是一个已经结束的上海日（上海比芝加哥早 13~14 小时），不会取到半天。
+//
+// 【渠道】BytePlus 侧没有可用的渠道归因（source 只有 39% 有标记）→ 四个指标全部落「未归因」行，
+// 与业务库那几个指标的处理一致。
+async function fetchSavvyByteplus(from, to) {
+  const cfg = SAVVY_BYTEPLUS;
+  const tz = cfg.timezone;
+  const dates = [];
+  for (let d = new Date(`${from}T00:00:00Z`); ymd(d) <= to; d.setUTCDate(d.getUTCDate() + 1)) dates.push(ymd(d));
+
+  const eventMetrics = cfg.metrics.filter((m) => !m.beauty);
+  const beautyMetrics = cfg.metrics.filter((m) => m.beauty);
+  // ⚠️ 这两条必须是**且**关系 → funnelStep 第 4 个参数传 "and"。
+  //    buildEventFilter 默认是 OR（历史约定，见它自己的注释），用默认值会算成
+  //    「savvy 的 或 任何产品里 face_score>=70 的」，小美数会比真值大好几倍。
+  const faceFilter = [
+    ...cfg.appNameFilter,
+    { property: "face_score", operation: ">=", values: [String(cfg.faceScoreMin)] },
+  ];
+
+  const out = {};   // date -> { key: n }
+  const ok = new Set();
+  const failed = [];
+
+  const perDay = await pMap(dates, async (date) => {
+    // 当天注册 = 注册时间落在这一天（目标时区）
+    const lo = dayStartMs(date, tz);
+    const hi = dayStartMs(shiftYmd(date, 1), tz);
+    const newUser = profileRangeExprs(cfg.registerTimeProp, lo, hi);
+    const period = dayRangePeriod(date, date, tz);
+    const got = {};
+    const errs = [];
+
+    // 注册 / IG绑定：普通事件去重人数
+    await Promise.all(eventMetrics.map(async (m) => {
+      try {
+        const rows = await fetchEventDaily({
+          eventName: m.event, period, filters: cfg.appNameFilter,
+          profileExpressions: newUser, timezone: tz,
+        });
+        got[m.key] = rows.reduce((a, r) => a + Number(r.count || 0), 0); // 单日窗口，只会有一行
+      } catch (e) { errs.push(`${m.label}: ${short(e)}`); }
+    }));
+
+    // 小美两列：漏斗 face_score>=70 → 目标事件（同日窗口），取第二步人数
+    await Promise.all(beautyMetrics.map(async (m) => {
+      try {
+        const steps = [
+          funnelStep("A", cfg.faceEvent, faceFilter, "and"),
+          funnelStep("B", m.event, cfg.appNameFilter),
+        ];
+        const counts = await fetchFunnelUsers({ steps, period, profileExpressions: newUser, windowDays: 1, timezone: tz });
+        got[m.key] = Number(counts[1] || 0);
+      } catch (e) { errs.push(`${m.label}: ${short(e)}`); }
+    }));
+
+    return { date, got, errs };
+  }, CONCURRENCY);
+
+  // 只有「窗口内每一天都取到了」的指标才允许覆盖库里的值 —— 与业务库那边同样的保守策略：
+  // 部分天失败时如果照写，会把没取到的那几天刷成 0（写库是按日期 DELETE+INSERT）。
+  for (const m of cfg.metrics) {
+    const okDays = perDay.filter((d) => d?.got?.[m.key] != null).length;
+    if (okDays === dates.length) ok.add(m.key);
+    else failed.push(`${m.label}: ${dates.length - okDays}/${dates.length} 天取数失败`);
+  }
+  for (const d of perDay) {
+    if (!d) continue;
+    out[d.date] = d.got;
+    d.errs.forEach((e) => failed.push(`${d.date} ${e}`));
+  }
+  return { data: out, ok, failed, dates };
+}
+
 // ───────────── ④ Savvy 后端（自有业务库 DMS，app_name=32）─────────────
 // 为什么不用 BytePlus：它区分不出 Savvy（同一个 app、同一套 pwa_* 埋点，source 里没有 savvy）。
 // 业务库能精确切：Savvy 的业务 user_id 100% 命中 userinfo 且 app_name=32，历史比 AF 完整
@@ -260,7 +364,8 @@ async function fetchDms(from, to) {
 //    刷成了 0（DMS 瞬时抖动一次，7 天数据全毁）。宁可留旧值，也绝不用 0 覆盖。
 async function loadExisting(from, to) {
   const { rows } = await query(
-    `SELECT to_char(date,'YYYY-MM-DD') AS date, product, channel, register, ig_bind, golive, chengcai
+    `SELECT to_char(date,'YYYY-MM-DD') AS date, product, channel, register, ig_bind, golive, chengcai,
+            beauty_register, beauty_ig_bind
        FROM xiaomei_conversion_daily WHERE date BETWEEN $1 AND $2`, [from, to]);
   const m = new Map();
   for (const r of rows) m.set(`${r.date}|${r.product}|${r.channel}`, r);
@@ -268,7 +373,7 @@ async function loadExisting(from, to) {
 }
 
 // ───────────────────────── 合并 → 行 ─────────────────────────
-function buildRows({ spend, bp, af, dms, existing, from, to }) {
+function buildRows({ spend, bp, af, dms, savvyBp, existing, from, to }) {
   const dates = [];
   for (let d = new Date(`${from}T00:00:00Z`); ymd(d) <= to; d.setUTCDate(d.getUTCDate() + 1)) dates.push(ymd(d));
 
@@ -277,7 +382,9 @@ function buildRows({ spend, bp, af, dms, existing, from, to }) {
   const cell = (date, product, channel) => {
     const k = `${date}|${product}|${channel}`;
     if (!map.has(k)) {
-      map.set(k, { date, product, channel, cost: 0, impression: 0, click: 0, install: 0, register: null, ig_bind: null, golive: null, chengcai: null });
+      const row = { date, product, channel, cost: 0, impression: 0, click: 0, install: 0 };
+      for (const key of NULLABLE_KEYS) row[key] = null;
+      map.set(k, row);
     }
     return map.get(k);
   };
@@ -322,30 +429,41 @@ function buildRows({ spend, bp, af, dms, existing, from, to }) {
     }
   }
 
-  // 业务库(DMS) 的指标**覆盖** AF/BytePlus 的同名指标（全量真实业务记录，比埋点全且能精确切产品），
-  // 落「未归因」行 —— 业务库没有渠道维度。
+  // ── 「无渠道维度」的权威口径**覆盖**上面按渠道写进去的同名指标，统一落「未归因」行 ──
+  // 两个来源共用这套逻辑：
+  //   · 业务库(DMS)：全量真实业务记录，比埋点全且能精确切产品 —— PWA 的注册/IG绑定/成材、Savvy 的成材
+  //   · Savvy 的 BytePlus「当天注册」新口径 —— 注册/IG绑定/小美注册/小美IG绑定
   // ⚠️ **只覆盖取数成功的指标**。失败的指标一律从 existing（库里现有值）原样带回，绝不写 0：
-  //    写库是按日期 DELETE+INSERT，失败时不带旧值就等于把那几天的好数据抹掉。
-  for (const p of PRODUCTS.filter((x) => x.dmsMetrics?.length)) {
-    const okSet = dms.ok?.[p.key] || new Set();
+  //    写库是按日期 DELETE+INSERT，失败时不带旧值就等于把那几天的好数据抹掉
+  //    （2026-08-16 就是这么把 08-09~08-15 的注册刷成 0 的）。
+  const overrideUnattributed = (productKey, metricKeys, okSet, dataByDate) => {
     for (const date of dates) {
-      const got = dms.data?.[p.key]?.[date];
-      const hadRow = ALL_CHANNELS.some((ch) => map.has(`${date}|${p.key}|${ch}`));
-      const prevUnattr = existing.get(`${date}|${p.key}|${UNATTRIBUTED}`);
+      const got = dataByDate?.[date];
+      const hadRow = ALL_CHANNELS.some((ch) => map.has(`${date}|${productKey}|${ch}`));
+      const prevUnattr = existing.get(`${date}|${productKey}|${UNATTRIBUTED}`);
       if (!hadRow && !got && !prevUnattr) continue; // 这天这个产品啥都没有，不凭空造行
 
-      // 先把 AF/BytePlus 写进各渠道行的同名指标清掉，口径统一到业务库
+      // 先把各渠道行里的同名指标清掉，口径统一到这个来源
       for (const ch of ALL_CHANNELS) {
-        const ex = map.get(`${date}|${p.key}|${ch}`);
-        if (ex) for (const k of p.dmsMetrics) ex[k] = null;
+        const ex = map.get(`${date}|${productKey}|${ch}`);
+        if (ex) for (const k of metricKeys) ex[k] = null;
       }
-      const c = cell(date, p.key, UNATTRIBUTED);
-      for (const k of p.dmsMetrics) {
+      const c = cell(date, productKey, UNATTRIBUTED);
+      for (const k of metricKeys) {
         c[k] = okSet.has(k)
           ? Number(got?.[k] || 0)                                   // 取数成功：没有行 = 那天真的是 0
           : (prevUnattr?.[k] == null ? null : Number(prevUnattr[k])); // 取数失败：保留库里旧值
       }
     }
+  };
+
+  // Savvy 的 BytePlus 新口径先落 —— 业务库那轮只覆盖成材，两边指标不重叠，先后无所谓，
+  // 但放前面更直观：这是 Savvy 注册/IG绑定的唯一来源。
+  for (const p of PRODUCTS.filter((x) => x.savvyBpMetrics?.length)) {
+    overrideUnattributed(p.key, p.savvyBpMetrics, savvyBp.ok || new Set(), savvyBp.data);
+  }
+  for (const p of PRODUCTS.filter((x) => x.dmsMetrics?.length)) {
+    overrideUnattributed(p.key, p.dmsMetrics, dms.ok?.[p.key] || new Set(), dms.data?.[p.key]);
   }
 
   return [...map.values()].sort((a, b) => a.date.localeCompare(b.date) || a.product.localeCompare(b.product) || a.channel.localeCompare(b.channel));
@@ -363,6 +481,7 @@ function buildRows({ spend, bp, af, dms, existing, from, to }) {
 //   所以在**渠道明细行**上算这三个单价，分子分母根本不在一起，必然算出 0 或天文数字。
 //   → 它们只在 **渠道='全部'** 的粒度算（GROUPING(channel)=1），渠道明细行一律留空。
 //   安装单价例外：安装和花费都来自 XMP、天然同行，所有粒度都有效。
+//   小美注册单价同理只在 渠道='全部' 算（Savvy 的小美两列同样落「未归因」行）。
 //   ⚠️ 旧写法 `SUM(cost) FILTER (WHERE register IS NOT NULL)` 已废弃：改走业务库后它只能捞到
 //      「未归因」行那 0 元花费 + 恰好 register=0 的渠道行，把 08-14 的注册单价算成了 $0.43
 //      （正确是 1025.19/207 = $4.95）。
@@ -372,18 +491,22 @@ async function buildChannelSummary(dates) {
     await c.query(
       `INSERT INTO xiaomei_channel_daily
          (date, product, channel, cost, impression, click, install, register, ig_bind, golive, chengcai,
-          cpm, ctr, cpc, cost_per_install, cost_per_register, cost_per_ig_bind, cost_per_chengcai)
+          beauty_register, beauty_ig_bind,
+          cpm, ctr, cpc, cost_per_install, cost_per_register, cost_per_ig_bind, cost_per_chengcai,
+          cost_per_beauty_register)
        SELECT date,
               COALESCE(product, '全部'), COALESCE(channel, '全部'),
               SUM(cost), SUM(impression), SUM(click), SUM(install),
               SUM(register), SUM(ig_bind), SUM(golive), SUM(chengcai),
+              SUM(beauty_register), SUM(beauty_ig_bind),
               SUM(cost) / NULLIF(SUM(impression),0) * 1000,
               SUM(click)::numeric / NULLIF(SUM(impression),0) * 100,
               SUM(cost) / NULLIF(SUM(click),0),
               SUM(cost) / NULLIF(SUM(install),0),
               CASE WHEN GROUPING(channel)=1 THEN SUM(cost) / NULLIF(SUM(register),0) END,
               CASE WHEN GROUPING(channel)=1 THEN SUM(cost) / NULLIF(SUM(ig_bind),0) END,
-              CASE WHEN GROUPING(channel)=1 THEN SUM(cost) / NULLIF(SUM(chengcai),0) END
+              CASE WHEN GROUPING(channel)=1 THEN SUM(cost) / NULLIF(SUM(chengcai),0) END,
+              CASE WHEN GROUPING(channel)=1 THEN SUM(cost) / NULLIF(SUM(beauty_register),0) END
          FROM xiaomei_conversion_daily
         WHERE date = ANY($1::date[])
         GROUP BY GROUPING SETS ((date, product, channel), (date, product), (date, channel), (date))`,
@@ -421,8 +544,13 @@ async function main() {
     console.log(`  ③ ${p.key}(AppsFlyer)：${hit.length ? hit.join(" · ") : af.note || "窗口内无数据"}${miss.length ? `｜留空：${miss.join("/")}` : ""}`);
   }
 
+  const savvyBp = await fetchSavvyByteplus(from, to);
+  const sbLabels = SAVVY_BYTEPLUS.metrics.filter((m) => savvyBp.ok.has(m.key)).map((m) => m.label).join("/");
+  console.log(`  ③.5 Savvy(BytePlus 当天注册口径 · ${SAVVY_BYTEPLUS.timezone})：${sbLabels || "全部失败"} ${savvyBp.dates.length} 天`);
+  savvyBp.failed.forEach((f) => console.warn(`     ⚠️ ${f} —— **保留库里旧值**，不写 0`));
+
   const dms = await fetchDms(from, to);
-  const existing = dms.failed.length ? await loadExisting(from, to) : new Map();
+  const existing = (dms.failed.length || savvyBp.failed.length) ? await loadExisting(from, to) : new Map();
   for (const p of PRODUCTS.filter((x) => x.dmsMetrics?.length)) {
     const days = Object.keys(dms.data?.[p.key] || {}).length;
     const labels = p.dmsMetrics.map((k) => BACKEND_METRICS.find((m) => m.key === k).label).join("/");
@@ -430,7 +558,7 @@ async function main() {
   }
   dms.failed.forEach((f) => console.warn(`     ⚠️ 业务库取数失败：${f} —— **保留库里旧值**，不写 0`));
 
-  const rows = buildRows({ spend, bp, af, dms, existing, from, to });
+  const rows = buildRows({ spend, bp, af, dms, savvyBp, existing, from, to });
   if (!rows.length) {
     console.log("\n❌ 没有任何数据，跳过写库，保留原值");
     await end();
@@ -449,7 +577,7 @@ async function main() {
   const last = rows.filter((r) => r.date === to);
   const n = (v) => (v == null ? "  留空" : String(v).padStart(6));
   console.log(`\n${to} 汇总（各渠道已合计）`);
-  console.log(`${pad("产品", 12)}${pad("花费", 11)}${pad("曝光", 10)}${pad("点击", 9)}${pad("安装", 8)}${pad("注册", 8)}${pad("IG绑定", 9)}${pad("GoLive", 8)}${pad("成材", 8)}`);
+  console.log(`${pad("产品", 12)}${pad("花费", 11)}${pad("曝光", 10)}${pad("点击", 9)}${pad("安装", 8)}${pad("注册", 8)}${pad("IG绑定", 9)}${pad("GoLive", 8)}${pad("成材", 8)}${pad("小美注册", 10)}${pad("小美IG", 8)}`);
   for (const p of PRODUCTS) {
     const g = last.filter((r) => r.product === p.key);
     if (!g.length) continue;
@@ -457,14 +585,25 @@ async function main() {
     console.log(
       pad(p.key, 12) + pad("$" + (sum("cost") || 0).toFixed(2), 11) + pad(sum("impression") || 0, 10) +
       pad(sum("click") || 0, 9) + pad(sum("install") || 0, 8) +
-      n(sum("register")) + "  " + n(sum("ig_bind")) + "  " + n(sum("golive")) + "  " + n(sum("chengcai")),
+      n(sum("register")) + "  " + n(sum("ig_bind")) + "  " + n(sum("golive")) + "  " + n(sum("chengcai")) +
+      "  " + n(sum("beauty_register")) + "  " + n(sum("beauty_ig_bind")),
     );
   }
 
   console.log(`\n✅ [小美投放转化] 已写入 Postgres：明细 ${rows.length} 行 + 渠道汇总 ${summaryRows} 行 / ${dates.length} 天（耗时 ${((Date.now() - t0) / 1000).toFixed(1)}s）`);
+
+  // 退出码语义：**只有整轮没写进任何数据才算失败**（上面 rows 为空的分支已经 exit 1）。
+  // 单个数据源抖动/未配置只打 ⚠️ 警告 —— 那些指标已经保留了库里的旧值，数据没被污染，
+  // 让整个 Railway 服务显示 CRASHED 反而会掩盖真正的故障。
+  // ⚠️ 2026-08-19 之前这里是 `if (bp.failed.length || dms.failed.length) exitCode = 1`，
+  //    结果 Railway 上没配 DMS_TOKEN → 每天必 CRASHED，真出问题时没人再看得见。
+  const warnings = [...bp.failed, ...savvyBp.failed, ...dms.failed];
+  if (warnings.length) {
+    console.warn(`\n⚠️ 本轮有 ${warnings.length} 条取数警告（对应指标已保留库里旧值，未写 0）：`);
+    warnings.slice(0, 10).forEach((w) => console.warn(`   · ${w}`));
+    if (warnings.length > 10) console.warn(`   · …另有 ${warnings.length - 10} 条`);
+  }
   await end();
-  // 主数据源缺口要让 cron 看得见（失败的指标已保留旧值，不会污染数据，但需要人知道）
-  if (bp.failed.length || dms.failed.length) process.exitCode = 1;
 }
 
 main().catch(async (e) => {

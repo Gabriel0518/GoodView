@@ -377,6 +377,17 @@ CREATE TABLE IF NOT EXISTS xiaomei_conversion_daily (
 CREATE INDEX IF NOT EXISTS xiaomei_conversion_daily_date_idx    ON xiaomei_conversion_daily (date);
 CREATE INDEX IF NOT EXISTS xiaomei_conversion_daily_product_idx ON xiaomei_conversion_daily (product, date);
 
+-- 「小美」= 当天还触发过 pwa_user_face_score 且 face_score >= 70 的那批人（用户 2026-08-19 定的口径）。
+-- 目前**只有 Savvy 有**，其余产品恒为 NULL（它们没走这套口径）。
+-- ⚠️ 这两列是**近似值、只会偏低**：BytePlus 接口做不到「同一人当天既做了 A 又做了 B」的无序交集，
+--    只能用有序漏斗 [face_score>=70 → 目标事件] 取第二步人数，漏掉「先触发后打分」的人。
+--    08-15 实测真值区间 [42,44]、漏斗给 42，偏差 <5%。完整论证见 lib/xiaomei.mjs 的 SAVVY_BYTEPLUS。
+-- ⚠️ Savvy 的这四个指标（注册/IG绑定/小美注册/小美IG绑定）按 **Asia/Shanghai** 切日，
+--    与本表其余部分的 America/Chicago 日界**不同**（用户 2026-08-19 拍板，为的是和给的 SQL 逐字一致，
+--    顺带与 XMP 的上海日花费天然对齐）。跨产品横向比较时要知道这一点。
+ALTER TABLE xiaomei_conversion_daily ADD COLUMN IF NOT EXISTS beauty_register bigint;
+ALTER TABLE xiaomei_conversion_daily ADD COLUMN IF NOT EXISTS beauty_ig_bind  bigint;
+
 
 -- ========== xiaomei_channel_daily：小美投放转化的**预聚合**汇总（date × 产品 × 渠道）==========
 -- 由 fetch-xiaomei.mjs 在写完明细表后从 xiaomei_conversion_daily 直接聚合出来，供飞书仪表盘画图。
@@ -421,3 +432,9 @@ CREATE TABLE IF NOT EXISTS xiaomei_channel_daily (
   PRIMARY KEY (date, product, channel)
 );
 CREATE INDEX IF NOT EXISTS xiaomei_channel_daily_date_idx ON xiaomei_channel_daily (date);
+
+-- 小美两列 + 小美注册单价（语义与明细表一致；单价同样只在 渠道='全部' 的粒度算，
+-- 因为小美两列落「未归因」行、那行花费为 0，渠道明细行上分子分母不在一起）。
+ALTER TABLE xiaomei_channel_daily ADD COLUMN IF NOT EXISTS beauty_register          bigint;
+ALTER TABLE xiaomei_channel_daily ADD COLUMN IF NOT EXISTS beauty_ig_bind           bigint;
+ALTER TABLE xiaomei_channel_daily ADD COLUMN IF NOT EXISTS cost_per_beauty_register numeric(12,4);
