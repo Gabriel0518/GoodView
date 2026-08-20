@@ -28,10 +28,12 @@
 //    同一行里 Savvy 的成材/GoLive 仍是芝加哥日 —— 跨指标/跨产品比较时要知道这个混合日界。
 //    窗口沿用芝加哥日标签是安全的：芝加哥的"昨天"一定是一个已经结束的上海日（上海早 13~14 小时）。
 // XMP 的日期按上海日切，两边不重切、只做 D↔D 标签对齐（用户 2026-08-16 定）。
-// **只写已经结束的芝加哥日**：目标窗口的最后一天 = 昨天(芝加哥)，永远不会把半天的数据写进去。
-// ⚠️ cron 定在北京 13:10 是踩着夏令时的日界（13:00 刚结束）。到了冬令时，芝加哥日要到北京 14:00
-//    才结束，13:10 跑的时候最新一天还没完 → 那天的数据由**次日**那轮的回补窗口补上（所以默认 7 天，
-//    不是 1 天）。想冬天也当天出数，把 cron 从 05:10 UTC 改成 06:10 UTC 即可。
+// **永远不写还没过完的一天**，但也不因此扣着已经齐了的一天不发：窗口末端 = 两个日界里
+// 更靠后的那个「昨天」（实践中就是北京的昨天），每个源各自填到自己那个日界的最后一个完整日，
+// 填不到的那天留 **NULL（看板留空）而不是 0**。详见 windowDates 的注释。
+// ⚠️ cron 定在北京 13:10 是踩着夏令时的芝加哥日界（13:00 刚结束）。到了冬令时要 14:00 才结束，
+//    13:10 跑的时候芝加哥那天还没完 → 那天的芝加哥侧指标由**次日**那轮的回补窗口补上
+//    （所以默认 7 天，不是 1 天）。上海侧的 XMP/Savvy 不受影响，任何时候跑都有昨日。
 import {
   fetchEventDaily, fetchEventDailyGrouped, fetchFunnelUsers,
   dayRangePeriod, dayStartMs, profileRangeExprs, funnelStep,
@@ -71,17 +73,35 @@ const NULLABLE_KEYS = [...BACKEND_KEYS, ...BEAUTY_METRICS.map((m) => m.key)];
 const ymd = (d) => d.toISOString().slice(0, 10);
 const shiftYmd = (day, n) => { const d = new Date(`${day}T00:00:00Z`); d.setUTCDate(d.getUTCDate() + n); return ymd(d); };
 const short = (e) => String(e?.message || e).replace(/\s+/g, " ").slice(0, 60);
+const todayIn = (tz) => new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(new Date());
+const daysBetween = (a, b) => Math.round((Date.parse(`${b}T00:00:00Z`) - Date.parse(`${a}T00:00:00Z`)) / 86400000);
 const pad = (s, n) => String(s).padEnd(n);
 const clamp0 = (n) => Math.max(0, n);
 
-// 窗口 = [最近一个已结束的芝加哥日 − (DAYS−1), 最近一个已结束的芝加哥日]
+// 窗口。**每个数据源填到它自己那个日界的最后一个完整日为止**，谁也不写半天的数。
+//
+// 【为什么不能只用一个日界】本表混着两个日界：
+//   · 芝加哥日：PWA/AI公会 的 BytePlus 指标、SmartReply 的 AF 指标、业务库指标
+//   · 上海日  ：XMP 的花费/曝光/点击/安装（XMP 本来就按上海日出数）、Savvy 的四个新指标
+// 上海比芝加哥早 13~14 小时，所以**上海的"昨天"总是 ≥ 芝加哥的"昨天"**：
+//   北京 00:00~13:00 之间跑，上海侧已经多出完整的一天，芝加哥那天还在进行中。
+//
+// 旧写法整表都卡在芝加哥日界上 → 北京上午去看表，最新一天永远是**前天**，
+// 哪怕 XMP 和 Savvy 的昨日数据早就齐了（2026-08-20 12:52 实测：表里最新 08-18，
+// 而 campaign_daily 已经有完整的 08-19 = $1552.99）。用户 2026-08-20 提出要看昨日。
+//
+// 现在：表覆盖到 to（两个日界里更靠后的那个，实践中就是北京的昨天），
+// 芝加哥日界的那几个源只填到 toChi，to 那天先留 NULL（**不是 0**，看板上就是留空），
+// 等北京 13:10 那轮 cron 芝加哥日结束后，7 天回补窗口自然把它补上。
 function windowDates() {
-  const todayChi = new Intl.DateTimeFormat("en-CA", { timeZone: TZ }).format(new Date()); // YYYY-MM-DD
-  const to = new Date(`${todayChi}T00:00:00Z`);
-  to.setUTCDate(to.getUTCDate() - 1);
-  const from = new Date(to);
-  from.setUTCDate(from.getUTCDate() - (DAYS - 1));
-  return { from: ymd(from), to: ymd(to) };
+  const yesterdayIn = (tz) => {
+    const today = new Intl.DateTimeFormat("en-CA", { timeZone: tz }).format(new Date()); // YYYY-MM-DD
+    return shiftYmd(today, -1);
+  };
+  const toChi = yesterdayIn(TZ);                          // 芝加哥日界的最后一个完整日
+  const toSh = yesterdayIn(SAVVY_BYTEPLUS.timezone);      // 上海日界的最后一个完整日
+  const to = toSh > toChi ? toSh : toChi;                 // 表要覆盖到哪天
+  return { from: shiftYmd(to, -(DAYS - 1)), to, toChi, toSh };
 }
 
 // ───────────────────────── ① 投放侧（XMP，读库）─────────────────────────
@@ -132,7 +152,9 @@ async function fetchSpend(from, to) {
 // （2026-08-16：注册全量 305 里 185 条无来源），按它拆渠道得到的单价不可用，不如不拆。
 // 花费/曝光/点击/安装仍按 XMP 的真实渠道分行，产品级汇总（渠道=全部）不受影响。
 async function fetchByteplus(from, to) {
-  const lastDays = DAYS + 1; // +1 覆盖「今天(进行中)」，取回后按窗口裁掉
+  // 覆盖到 from 那天为止（+1 是「今天(进行中)」那一天），取回后按 [from,to] 裁掉。
+  // ⚠️ 不能写死 DAYS+1：窗口末端现在按各自日界算，from 到今天的距离可能大于 DAYS。
+  const lastDays = daysBetween(from, todayIn(TZ)) + 1;
   const results = await pMap(
     BACKEND_METRICS,
     async (m) => {
@@ -374,7 +396,7 @@ async function loadExisting(from, to) {
 }
 
 // ───────────────────────── 合并 → 行 ─────────────────────────
-function buildRows({ spend, bp, af, dms, savvyBp, existing, from, to }) {
+function buildRows({ spend, bp, af, dms, savvyBp, existing, from, to, toChi }) {
   const dates = [];
   for (let d = new Date(`${from}T00:00:00Z`); ymd(d) <= to; d.setUTCDate(d.getUTCDate() + 1)) dates.push(ymd(d));
 
@@ -401,6 +423,7 @@ function buildRows({ spend, bp, af, dms, savvyBp, existing, from, to }) {
   // BytePlus 产品（PWA / AI公会）：取数成功的指标全部落数（没数的日/渠道 = 0）；失败的留 NULL。
   for (const p of PRODUCTS.filter((x) => x.backend === "byteplus")) {
     for (const date of dates) {
+      if (date > toChi) continue; // 芝加哥日界：这天还没过完，留 NULL 等下一轮，别写 0
       for (const ch of ALL_CHANNELS) {
         const got = bp.data[p.key]?.[ch]?.[date];
         // 该产品该渠道在这天既没花费也没后端数 → 不凭空造行
@@ -417,6 +440,7 @@ function buildRows({ spend, bp, af, dms, savvyBp, existing, from, to }) {
     const active = af.activeEvents?.[p.key] || {};
     if (!Object.values(active).some(Boolean)) continue; // 该产品完全没有 AF 数据源 → 全 NULL
     for (const date of dates) {
+      if (date > toChi) continue; // 同上：AF 侧也按芝加哥日切
       for (const ch of ALL_CHANNELS) {
         const got = af.data[p.key]?.[ch]?.[date];
         const existing = map.get(`${date}|${p.key}|${ch}`);
@@ -437,8 +461,10 @@ function buildRows({ spend, bp, af, dms, savvyBp, existing, from, to }) {
   // ⚠️ **只覆盖取数成功的指标**。失败的指标一律从 existing（库里现有值）原样带回，绝不写 0：
   //    写库是按日期 DELETE+INSERT，失败时不带旧值就等于把那几天的好数据抹掉
   //    （2026-08-16 就是这么把 08-09~08-15 的注册刷成 0 的）。
-  const overrideUnattributed = (productKey, metricKeys, okSet, dataByDate) => {
+  // maxDate = 该来源自己那个日界的最后一个完整日；超过就跳过（留 NULL，别写 0）。
+  const overrideUnattributed = (productKey, metricKeys, okSet, dataByDate, maxDate) => {
     for (const date of dates) {
+      if (date > maxDate) continue;
       const got = dataByDate?.[date];
       const hadRow = ALL_CHANNELS.some((ch) => map.has(`${date}|${productKey}|${ch}`));
       const prevUnattr = existing.get(`${date}|${productKey}|${UNATTRIBUTED}`);
@@ -461,10 +487,10 @@ function buildRows({ spend, bp, af, dms, savvyBp, existing, from, to }) {
   // Savvy 的 BytePlus 新口径先落 —— 业务库那轮只覆盖成材，两边指标不重叠，先后无所谓，
   // 但放前面更直观：这是 Savvy 注册/IG绑定的唯一来源。
   for (const p of PRODUCTS.filter((x) => x.savvyBpMetrics?.length)) {
-    overrideUnattributed(p.key, p.savvyBpMetrics, savvyBp.ok || new Set(), savvyBp.data);
+    overrideUnattributed(p.key, p.savvyBpMetrics, savvyBp.ok || new Set(), savvyBp.data, to);      // 上海日界，填到底
   }
   for (const p of PRODUCTS.filter((x) => x.dmsMetrics?.length)) {
-    overrideUnattributed(p.key, p.dmsMetrics, dms.ok?.[p.key] || new Set(), dms.data?.[p.key]);
+    overrideUnattributed(p.key, p.dmsMetrics, dms.ok?.[p.key] || new Set(), dms.data?.[p.key], toChi); // 芝加哥日界
   }
 
   return [...map.values()].sort((a, b) => a.date.localeCompare(b.date) || a.product.localeCompare(b.product) || a.channel.localeCompare(b.channel));
@@ -527,17 +553,19 @@ async function buildChannelSummary(dates) {
 
 async function main() {
   const t0 = Date.now();
-  const { from, to } = windowDates();
-  console.log(`[小美投放转化] 窗口 ${from} ~ ${to}（${DAYS} 天，按 ${TZ} 日切 = 北京 13:00~次日13:00）\n`);
+  const { from, to, toChi, toSh } = windowDates();
+  console.log(`[小美投放转化] 窗口 ${from} ~ ${to}（${DAYS} 天）`);
+  console.log(`  日界：XMP + Savvy 新口径按 ${SAVVY_BYTEPLUS.timezone} → 填到 ${toSh}`);
+  console.log(`        其余后端指标按 ${TZ} → 填到 ${toChi}${toChi < to ? `（${to} 那天芝加哥还没过完，先留空，13:10 那轮补）` : ""}\n`);
 
   const spend = await fetchSpend(from, to);
   console.log(`  ① 投放侧(XMP 读库)：${spend.length} 行 产品×渠道×日`);
 
-  const bp = await fetchByteplus(from, to);
+  const bp = await fetchByteplus(from, toChi);
   console.log(`  ② PWA/AI公会(BytePlus)：${bp.okKeys.length}/${BACKEND_METRICS.length} 个指标取数成功`);
   bp.failed.forEach((f) => console.warn(`     ⚠️ ${f}（该指标写 NULL，保留看板留空）`));
 
-  const af = await fetchAf(from, to);
+  const af = await fetchAf(from, toChi);
   for (const p of PRODUCTS.filter((x) => x.backend === "af")) {
     const active = af.activeEvents?.[p.key] || {};
     const hit = BACKEND_METRICS.filter((m) => active[m.key]).map((m) => `${m.label}=${active[m.key]}`);
@@ -545,12 +573,12 @@ async function main() {
     console.log(`  ③ ${p.key}(AppsFlyer)：${hit.length ? hit.join(" · ") : af.note || "窗口内无数据"}${miss.length ? `｜留空：${miss.join("/")}` : ""}`);
   }
 
-  const savvyBp = await fetchSavvyByteplus(from, to);
+  const savvyBp = await fetchSavvyByteplus(from, toSh);
   const sbLabels = SAVVY_BYTEPLUS.metrics.filter((m) => savvyBp.ok.has(m.key)).map((m) => m.label).join("/");
   console.log(`  ③.5 Savvy(BytePlus 当天注册口径 · ${SAVVY_BYTEPLUS.timezone})：${sbLabels || "全部失败"} ${savvyBp.dates.length} 天`);
   savvyBp.failed.forEach((f) => console.warn(`     ⚠️ ${f} —— **保留库里旧值**，不写 0`));
 
-  const dms = await fetchDms(from, to);
+  const dms = await fetchDms(from, toChi);
   const existing = (dms.failed.length || savvyBp.failed.length) ? await loadExisting(from, to) : new Map();
   for (const p of PRODUCTS.filter((x) => x.dmsMetrics?.length)) {
     const days = Object.keys(dms.data?.[p.key] || {}).length;
@@ -559,7 +587,7 @@ async function main() {
   }
   dms.failed.forEach((f) => console.warn(`     ⚠️ 业务库取数失败：${f} —— **保留库里旧值**，不写 0`));
 
-  const rows = buildRows({ spend, bp, af, dms, savvyBp, existing, from, to });
+  const rows = buildRows({ spend, bp, af, dms, savvyBp, existing, from, to, toChi });
   if (!rows.length) {
     console.log("\n❌ 没有任何数据，跳过写库，保留原值");
     await end();
